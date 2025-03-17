@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "ROS",
+            "includePath": [
+                "/usr/include/**",
+                "/root/ros2_ws/install/**",
+                "/root/ros2_ws/src/**"
+            ],
+            "browse": {
+                "databaseFilename": "",
+                "limitSymbolsToIncludedHeaders": true
+            },
+            "intelliSenseMode": "gcc-x64",
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu17",
+            "cppStandard": "gnu++17",
+            "compileCommands": "/root/ros2_ws/build/compile_commands.json",
+            "configurationProvider": "ms-vscode.makefile-tools"
+        }
+    ],
+    "version": 4
+}
