@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-True Cartesian Motion Controller with Trapezoidal Velocity Profiles
+ Cartesian Motion Controller with Trapezoidal Velocity Profiles
 
 This implementation achieves CONSTANT-VELOCITY Cartesian motion in the XY plane
 by using MoveIt's inverse kinematics service to compute joint angles at each
@@ -169,7 +169,7 @@ class TrapezoidalVelocityProfile:
 
 class CartesianMotionController(Node):
     """
-    Controller for TRUE Cartesian motion using MoveIt IK.
+    Controller for  Cartesian motion using MoveIt IK.
     
     This achieves constant-velocity end-effector motion in Cartesian space
     by computing inverse kinematics at each trajectory point.
@@ -1122,7 +1122,7 @@ def main():
     logger.info("  - Cartesian velocities show TRAPEZOIDAL profiles")
     logger.info("  - XY trajectory shows STRAIGHT LINES")
     logger.info("  - Joint velocities are NOT trapezoidal (expected!)")
-    logger.info("  This proves TRUE Cartesian motion with constant velocity!")
+    logger.info("  This proves  Cartesian motion with constant velocity!")
     
     # Cleanup - proper shutdown to avoid "terminate called without an active exception"
     logger.info("\nShutting down...")

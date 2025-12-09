@@ -24,7 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'joint_space_motion = puma560_py.joint_space_motion:main',
-            'true_cartesian_motion = puma560_py.true_cartesian_motion:main',
+            'cartesian_motion = puma560_py.cartesian_motion:main',
             'compliance_control = puma560_py.compliance_control:main',
         ],
     },

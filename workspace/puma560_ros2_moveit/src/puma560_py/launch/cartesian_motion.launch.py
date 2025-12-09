@@ -207,12 +207,12 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # TRUE CARTESIAN MOTION NODE (delayed to wait for everything)
+    # CARTESIAN MOTION NODE (delayed to wait for everything)
     # =========================================================
-    true_cartesian_motion_node = Node(
+    cartesian_motion_node = Node(
         package="puma560_py",
-        executable="true_cartesian_motion",
-        name="true_cartesian_motion",
+        executable="cartesian_motion",
+        name="cartesian_motion",
         output="screen",
         parameters=[{"use_sim_time": True}]
     )
@@ -220,7 +220,7 @@ def generate_launch_description():
     # Delay motion node to let MoveIt fully initialize
     delayed_cartesian_motion = TimerAction(
         period=12.0,
-        actions=[true_cartesian_motion_node]
+        actions=[cartesian_motion_node]
     )
     
     # =========================================================
