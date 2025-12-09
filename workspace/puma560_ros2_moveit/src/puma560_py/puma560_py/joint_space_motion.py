@@ -580,16 +580,25 @@ def plot_velocities_corrected(data, output_path):
                 'b--', linewidth=1, label='lift (meas)', alpha=0.5)
     
     for i, jname in enumerate(['j1', 'j2', 'j3', 'j4', 'j5', 'j6']):
+        # Commanded positions (solid line)
         if 'commanded_positions' in data and jname in data['commanded_positions']:
             cmd_pos = data['commanded_positions'][jname]
             if len(cmd_pos) > 0:
                 ax4.plot(commanded_time[:len(cmd_pos)], cmd_pos,
                         color=colors[i], linewidth=2, label=f'{jname} (cmd)', alpha=0.8)
+        
+        # Measured positions (dashed line)
+        if jname in data['positions']:
+            meas_pos = data['positions'][jname]
+            if len(meas_pos) > 0:
+                ax4.plot(measured_time[:len(meas_pos)], meas_pos,
+                        color=colors[i], linewidth=1, linestyle='--', 
+                        label=f'{jname} (meas)', alpha=0.5)
     
     ax4.set_xlabel('Time (s)')
     ax4.set_ylabel('Position (m or rad)')
-    ax4.set_title('Joint Positions: Commanded vs Measured', fontsize=12, fontweight='bold')
-    ax4.legend(loc='upper right', ncol=3)
+    ax4.set_title('Joint Positions: Commanded (solid) vs Measured (dashed)', fontsize=12, fontweight='bold')
+    ax4.legend(loc='upper right', ncol=4, fontsize=8)
     ax4.grid(True, alpha=0.3)
     
     # Add overall title

@@ -41,14 +41,14 @@ def generate_launch_description():
         ]
     )
     
-    # 3. Launch Cartesian Motion node (after 15 seconds total - 5 more for controller)
-    cartesian_motion_node = TimerAction(
+    # 3. Launch joint_space Motion node (after 15 seconds total - 5 more for controller)
+    joint_space_motion_node = TimerAction(
         period=15.0,
         actions=[
-            LogInfo(msg="Starting cartesian motion execution..."),
+            LogInfo(msg="Starting joint_space motion execution..."),
             Node(
                 package="puma560_py",
-                executable="cartesian_motion",
+                executable="joint_space_motion",
                 parameters=[
                     moveit_config.to_dict(),
                     {'use_sim_time': True}
@@ -62,6 +62,6 @@ def generate_launch_description():
         LogInfo(msg="Starting Gazebo simulation..."),
         gazebo_launch,
         controller_launch,
-        cartesian_motion_node,
+        joint_space_motion_node,
     ])
 

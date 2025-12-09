@@ -16,7 +16,7 @@ def generate_launch_description():
 
     launch_node = Node(
         package="puma560_py",
-        executable="cartesian_motion",
+        executable="joint_space_motion",
         parameters= [moveit_config.to_dict(),
                      {'use_sim_time' : True}]
     )
