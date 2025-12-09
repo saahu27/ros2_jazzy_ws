@@ -6,7 +6,6 @@ This implementation achieves CONSTANT-VELOCITY Cartesian motion in the XY plane
 by using MoveIt's inverse kinematics service to compute joint angles at each
 timestep along a straight-line Cartesian path.
 
-Key Difference from Joint-Space Motion:
 - Joint-Space: q(t) = q_start + (q_end - q_start) * s(t)  → Curved Cartesian path
 - Cartesian:   x(t) = x_start + (x_end - x_start) * s(t)  → Straight Cartesian path
                 q(t) = IK(x(t))
@@ -415,7 +414,7 @@ class CartesianMotionController(Node):
         """
         Generate a joint trajectory for straight-line Cartesian motion.
         
-        This is the KEY function that implements TRUE Cartesian motion:
+        Cartesian motion:
         1. Compute Cartesian distance
         2. Apply trapezoidal profile in Cartesian space
         3. Interpolate poses linearly
@@ -758,7 +757,7 @@ def smooth_signal(signal, window_size=15):
 
 def plot_cartesian_motion(data, output_path):
     """
-    Plot Cartesian motion results with clear COMMANDED vs MEASURED comparisons:
+    Plot Cartesian motion results COMMANDED vs MEASURED comparisons:
     1. End-effector velocities: commanded vs measured
     2. End-effector XY trajectory: measured (solid) vs commanded (dashed)
     3. Joint velocities: all 7 joints, commanded vs measured
@@ -840,7 +839,7 @@ def plot_cartesian_motion(data, output_path):
     
     ax2.set_xlabel('X Position (m)')
     ax2.set_ylabel('Y Position (m)')
-    ax2.set_title('END-EFFECTOR XY TRAJECTORY: Measured (solid) vs Commanded (dashed)\n(Straight lines confirm true Cartesian motion)', 
+    ax2.set_title('END-EFFECTOR XY TRAJECTORY: Measured (solid) vs Commanded (dashed)\n(Straight lines confirm Cartesian motion)', 
                   fontsize=12, fontweight='bold')
     ax2.legend(loc='upper right', fontsize=10)
     ax2.grid(True, alpha=0.3)
@@ -898,7 +897,7 @@ def plot_cartesian_motion(data, output_path):
     ax3.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
     
     # Overall title
-    fig.suptitle('TRUE CARTESIAN MOTION: End-Effector & Joint Velocity Analysis', 
+    fig.suptitle('CARTESIAN MOTION: End-Effector & Joint Velocity Analysis', 
                  fontsize=14, fontweight='bold', y=1.01)
     
     plt.tight_layout()
@@ -909,17 +908,17 @@ def plot_cartesian_motion(data, output_path):
 
 def main():
     """
-    Main function demonstrating TRUE Cartesian motion with trapezoidal velocity profiles.
+    Main function demonstrating Cartesian motion with trapezoidal velocity profiles.
     
     The end-effector moves in STRAIGHT LINES in the XY plane at constant velocity,
     at multiple Z-heights adjusted via the lift joint.
     """
     rclpy.init()
     
-    logger = get_logger("true_cartesian_motion")
+    logger = get_logger("cartesian_motion")
     
     logger.info("=" * 70)
-    logger.info(" TRUE CARTESIAN MOTION with Trapezoidal Velocity Profiles")
+    logger.info(" CARTESIAN MOTION with Trapezoidal Velocity Profiles")
     logger.info("=" * 70)
     logger.info("")
     logger.info("This demo achieves CONSTANT-VELOCITY Cartesian motion by:")
@@ -1112,7 +1111,7 @@ def main():
     
     os.makedirs(RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_path = os.path.join(RESULTS_DIR, f"true_cartesian_motion_{timestamp}.png")
+    plot_path = os.path.join(RESULTS_DIR, f"cartesian_motion_{timestamp}.png")
     
     plot_cartesian_motion(data, plot_path)
     
