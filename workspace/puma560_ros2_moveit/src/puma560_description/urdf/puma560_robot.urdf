@@ -33,9 +33,77 @@
 
 
   <link name="world"/>
-  
+
+  <!-- ========== LIFT COLUMN ========== -->
+  <!-- Static lift column/rail that the carriage slides along -->
+  <link name="lift_column_link">
+    <xacro:default_inertial mass="50.0"/>
+    <visual>
+      <!-- Vertical column/rail - 1.2m tall to accommodate full lift range -->
+      <geometry>
+        <box size="0.08 0.08 1.2"/>
+      </geometry>
+      <origin xyz="-0.15 0 0.6" rpy="0 0 0"/>
+      <material name="blue"/>
+    </visual>
+    <visual>
+      <!-- Base plate for the column -->
+      <geometry>
+        <box size="0.4 0.4 0.02"/>
+      </geometry>
+      <origin xyz="0 0 0.01" rpy="0 0 0"/>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <!-- Fixed joint attaching column to world -->
+  <joint name="lift_column_joint" type="fixed">
+    <parent link="world"/>
+    <child link="lift_column_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ========== LIFT MECHANISM (Prismatic Joint) ========== -->
+  <!-- Lift carriage - platform that slides up/down on Z-axis -->
+  <link name="lift_link">
+    <xacro:default_inertial mass="5.0"/>
+    <visual>
+      <!-- Lift platform/carriage -->
+      <geometry>
+        <box size="0.25 0.25 0.05"/>
+      </geometry>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
+      <material name="red"/>
+    </visual>
+    <visual>
+      <!-- Bracket connecting platform to column -->
+      <geometry>
+        <box size="0.12 0.1 0.15"/>
+      </geometry>
+      <origin xyz="-0.12 0 0.0" rpy="0 0 0"/>
+      <material name="red"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.25 0.25 0.05"/>
+      </geometry>
+      <origin xyz="0 0 -0.025" rpy="0 0 0"/>
+    </collision>
+  </link>
+
+  <!-- Lift joint - prismatic joint along Z-axis (0.0 to 1.0 meters) -->
+  <joint name="lift_joint" type="prismatic">
+    <parent link="world"/>
+    <child link="lift_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="5000.0" lower="0.0" upper="1.0" velocity="1.0"/>
+    <dynamics damping="100.0" friction="10.0"/>
+  </joint>
+
+  <!-- ========== ARM BASE ========== -->
   <link name="link1">
-    <xacro:default_inertial mass="100.0"/>
+    <xacro:default_inertial mass="10.0"/>
     <visual>
       <geometry>
         <mesh filename="package://puma560_description/meshes/puma_link1.stl" scale="0.0254 0.0254 0.0254"/>
@@ -67,18 +135,19 @@
     </collision>
   </link>
 
-  <joint name="virtual_joint" type="fixed">
-    <parent link="world"/>
+  <!-- Fixed joint connecting lift to arm base -->
+  <joint name="arm_base_joint" type="fixed">
+    <parent link="lift_link"/>
     <child link="link1"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
-</joint> 
+  </joint> 
   <joint name="j1" type="revolute">
     <parent link="link1"/>
     <child link="link2"/>
     <origin rpy="1.570796325 0 0" xyz="0 0 0.6718"/>
     <axis xyz="0 1 0"/>
     <!-- This is descibed in child frame -->
-    <limit effort="1000.0" lower="-3.14159265" upper="3.14159265" velocity="0"/>
+    <limit effort="1000.0" lower="-3.14159265" upper="3.14159265" velocity="2.0"/>
   </joint>
   <link name="link3">
     <xacro:default_inertial mass="0.1"/>
@@ -102,7 +171,7 @@
     <origin rpy="0 0 0" xyz="0 0 0"/>
     <axis xyz="0 0 1"/>
     <!-- This is descibed in child frame -->
-    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="0"/>
+    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="2.0"/>
   </joint>
   <link name="link4">
     <xacro:default_inertial mass="0.1"/>
@@ -126,7 +195,7 @@
     <origin rpy="0 0 -1.570796325" xyz="0.4318 -0.0203 0.1501"/>
     <axis xyz="0 0 1"/>
     <!-- This is descibed in child frame -->
-    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="0"/>
+    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="2.0"/>
   </joint>
   <link name="link5">
     <xacro:default_inertial mass="0.1"/>
@@ -149,7 +218,7 @@
     <child link="link5"/>
     <origin rpy="1.570796325 0 1.570796325" xyz="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="0"/>
+    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="2.0"/>
   </joint>
   <link name="link6">
     <xacro:default_inertial mass="0.1"/>
@@ -172,7 +241,7 @@
     <child link="link6"/>
     <origin rpy="1.570796325 0 0" xyz="0 0 0.4331"/>
     <axis xyz="0 0 1"/>
-    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="0"/>
+    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="2.0"/>
   </joint>
   <link name="link7">
     <xacro:default_inertial mass="0.1"/>
@@ -195,6 +264,6 @@
     <child link="link7"/>
     <origin rpy="-1.570796325 0 0" xyz="0 0.0558 0"/>
     <axis xyz="0 0 1"/>
-    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="0"/>
+    <limit effort="1000.0" lower="-1.570796325" upper="1.570796325" velocity="2.0"/>
   </joint>
 </robot>

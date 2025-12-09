@@ -20,6 +20,16 @@
             </hardware>
         </xacro:unless>
 
+        <!-- Lift Joint (Prismatic - Z axis, 0 to 1 meter) -->
+        <joint name="lift_joint">
+            <command_interface name="position">
+                <param name="min">0.0</param>
+                <param name="max">1.0</param>
+            </command_interface>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+        </joint>
+
         <joint name="j1">
             <command_interface name="position">
             <param name="min">-${PI / 2}</param>

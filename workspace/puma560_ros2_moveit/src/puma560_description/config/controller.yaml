@@ -1,6 +1,6 @@
 controller_manager:
   ros__parameters:
-    update_rate: 10 # Hz
+    update_rate: 100 # Hz
 
     arm_controller:
       type: joint_trajectory_controller/JointTrajectoryController
@@ -11,6 +11,7 @@ controller_manager:
 arm_controller:
   ros__parameters:
     joints:
+      - lift_joint
       - j1
       - j2
       - j3
@@ -26,3 +27,34 @@ arm_controller:
 
     open_loop_control: true
     allow_integration_in_goal_trajectories: true
+
+    # PID gains for Gazebo simulation (position control)
+    gains:
+      lift_joint:
+        p: 1000.0
+        i: 10.0
+        d: 50.0
+      j1:
+        p: 500.0
+        i: 5.0
+        d: 25.0
+      j2:
+        p: 500.0
+        i: 5.0
+        d: 25.0
+      j3:
+        p: 500.0
+        i: 5.0
+        d: 25.0
+      j4:
+        p: 200.0
+        i: 2.0
+        d: 10.0
+      j5:
+        p: 200.0
+        i: 2.0
+        d: 10.0
+      j6:
+        p: 200.0
+        i: 2.0
+        d: 10.0

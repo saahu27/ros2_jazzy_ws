@@ -47,6 +47,22 @@ RUN apt-get update && \
     ros-${ROS_DISTRO}-rviz2 \
     ros-${ROS_DISTRO}-rqt-reconfigure
 
+# Install PUMA 560 dependencies: ROS2 Controllers, MoveIt2, and Gazebo integration
+RUN apt-get update && \
+    apt-get install -y \
+    ros-${ROS_DISTRO}-ros2-controllers \
+    ros-${ROS_DISTRO}-joint-trajectory-controller \
+    ros-${ROS_DISTRO}-joint-state-broadcaster \
+    ros-${ROS_DISTRO}-controller-manager \
+    ros-${ROS_DISTRO}-moveit \
+    ros-${ROS_DISTRO}-moveit-py \
+    ros-${ROS_DISTRO}-moveit-configs-utils \
+    ros-${ROS_DISTRO}-moveit-ros-move-group \
+    ros-${ROS_DISTRO}-moveit-planners-ompl \
+    ros-${ROS_DISTRO}-moveit-ros-planning-interface \
+    ros-${ROS_DISTRO}-ros-gz \
+    ros-${ROS_DISTRO}-gz-ros2-control
+
 # Install Mesa graphics drivers
 # Mesa is an open-source implementation of OpenGL and other graphics APIs
 # It's crucial for 3D rendering in many applications, including RViz in ROS

@@ -29,7 +29,8 @@ def generate_launch_description():
     
     ros_distro = os.environ["ROS_DISTRO"]
     is_ignition = "True" if ros_distro == "humble" else "False"
-    physics_engine = "" if ros_distro == "humble" else "--physics-engine gz-physics-bullet-featherstone-plugin"
+    # Use DART physics engine - supports prismatic joints (bullet-featherstone doesn't)
+    physics_engine = "" if ros_distro == "humble" else "--physics-engine gz-physics-dartsim-plugin"
 
     robot_description = ParameterValue(Command([
             "xacro ",

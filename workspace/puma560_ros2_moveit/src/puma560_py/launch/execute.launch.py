@@ -13,9 +13,10 @@ def generate_launch_description():
         .moveit_cpp(file_path="config/planning.yaml")
         .to_moveit_configs()
     )
+
     launch_node = Node(
         package="puma560_py",
-        executable="execute",
+        executable="cartesian_motion",
         parameters= [moveit_config.to_dict(),
                      {'use_sim_time' : True}]
     )

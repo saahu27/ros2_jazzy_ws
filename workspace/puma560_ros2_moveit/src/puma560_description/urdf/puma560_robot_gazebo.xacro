@@ -18,4 +18,53 @@
     </xacro:unless>
   </gazebo>
 
+  <!-- Gazebo joint physics settings for lift_joint -->
+  <gazebo reference="lift_joint">
+    <provideFeedback>true</provideFeedback>
+    <implicitSpringDamper>true</implicitSpringDamper>
+  </gazebo>
+
+  <!-- ========== LIFT MECHANISM COLLISION SETTINGS ========== -->
+  <!-- Lift column (fixed structure) - no collision to allow lift movement -->
+  <gazebo reference="lift_column_link">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <!-- Lift platform (moving carriage) -->
+  <gazebo reference="lift_link">
+    <mu1>0.2</mu1>
+    <mu2>0.2</mu2>
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <!-- ========== ARM LINKS COLLISION SETTINGS ========== -->
+  <!-- Disable self-collision for all arm links to prevent internal collisions -->
+  <gazebo reference="link1">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link2">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link3">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link4">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link5">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link6">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
+  <gazebo reference="link7">
+    <selfCollide>false</selfCollide>
+  </gazebo>
+
 </robot>

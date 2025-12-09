@@ -10,6 +10,7 @@ moveit_simple_controller_manager:
     type: FollowJointTrajectory
     default: true
     joints:
+      - lift_joint
       - j1
       - j2
       - j3

@@ -1,7 +1,8 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="puma560">
+    <!-- Planning group: arm with lift -->
     <group name="arm">
-        <joint name="virtual_joint"/>
+        <joint name="lift_joint"/>
         <joint name="j1"/>
         <joint name="j2"/>
         <joint name="j3"/>
@@ -10,7 +11,9 @@
         <joint name="j6"/>
     </group>
 
+    <!-- Home state: lift at 0.0m (bottom), all arm joints at 0 -->
     <group_state name="home" group="arm">
+        <joint name="lift_joint" value="0.0"/>
         <joint name="j1" value="0"/>
         <joint name="j2" value="0"/>
         <joint name="j3" value="0"/>
@@ -19,25 +22,68 @@
         <joint name="j6" value="0"/>
     </group_state>
 
-    <disable_collisions link1="link1" link2="link2" reason= "adjacent"/>
-    <disable_collisions link1="link1" link2="link3" reason= "adjacent"/>
-    <disable_collisions link1="link1" link2="link4" reason= "adjacent"/>
-    <disable_collisions link1="link1" link2="link5" reason= "adjacent"/>
-    <disable_collisions link1="link1" link2="link6" reason= "adjacent"/>
-    <disable_collisions link1="link1" link2="link7" reason= "adjacent"/>
-    <disable_collisions link1="link2" link2="link3" reason= "adjacent"/>
-    <disable_collisions link1="link2" link2="link4" reason= "adjacent"/>
-    <disable_collisions link1="link2" link2="link5" reason= "adjacent"/>
-    <disable_collisions link1="link2" link2="link6" reason= "adjacent"/>
-    <disable_collisions link1="link2" link2="link7" reason= "adjacent"/>
-    <disable_collisions link1="link3" link2="link4" reason= "adjacent"/>
-    <disable_collisions link1="link3" link2="link5" reason= "adjacent"/>
-    <disable_collisions link1="link3" link2="link6" reason= "adjacent"/>
-    <disable_collisions link1="link3" link2="link7" reason= "adjacent"/>
-    <disable_collisions link1="link4" link2="link5" reason= "adjacent"/>
-    <disable_collisions link1="link4" link2="link6" reason= "adjacent"/>
-    <disable_collisions link1="link4" link2="link7" reason= "adjacent"/>
-    <disable_collisions link1="link5" link2="link6" reason= "adjacent"/>
-    <disable_collisions link1="link5" link2="link7" reason= "adjacent"/>
-    <disable_collisions link1="link6" link2="link7" reason= "adjacent"/>
+    <!-- Lift at bottom position -->
+    <group_state name="lift_low" group="arm">
+        <joint name="lift_joint" value="0.0"/>
+        <joint name="j1" value="0"/>
+        <joint name="j2" value="0"/>
+        <joint name="j3" value="0"/>
+        <joint name="j4" value="0"/>
+        <joint name="j5" value="0"/>
+        <joint name="j6" value="0"/>
+    </group_state>
+
+    <!-- Lift at top position -->
+    <group_state name="lift_high" group="arm">
+        <joint name="lift_joint" value="1.0"/>
+        <joint name="j1" value="0"/>
+        <joint name="j2" value="0"/>
+        <joint name="j3" value="0"/>
+        <joint name="j4" value="0"/>
+        <joint name="j5" value="0"/>
+        <joint name="j6" value="0"/>
+    </group_state>
+
+    <!-- Collision exclusions for lift_column_link (fixed column/rail) -->
+    <!-- Column has no collision geometry but disable checks anyway for safety -->
+    <disable_collisions link1="lift_column_link" link2="lift_link" reason="adjacent"/>
+    <disable_collisions link1="lift_column_link" link2="link1" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link2" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link3" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link4" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link5" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link6" reason="never"/>
+    <disable_collisions link1="lift_column_link" link2="link7" reason="never"/>
+
+    <!-- Collision exclusions for lift_link (moving platform) -->
+    <disable_collisions link1="lift_link" link2="link1" reason="adjacent"/>
+    <disable_collisions link1="lift_link" link2="link2" reason="never"/>
+    <disable_collisions link1="lift_link" link2="link3" reason="never"/>
+    <disable_collisions link1="lift_link" link2="link4" reason="never"/>
+    <disable_collisions link1="lift_link" link2="link5" reason="never"/>
+    <disable_collisions link1="lift_link" link2="link6" reason="never"/>
+    <disable_collisions link1="lift_link" link2="link7" reason="never"/>
+
+    <!-- Existing collision exclusions -->
+    <disable_collisions link1="link1" link2="link2" reason="adjacent"/>
+    <disable_collisions link1="link1" link2="link3" reason="adjacent"/>
+    <disable_collisions link1="link1" link2="link4" reason="adjacent"/>
+    <disable_collisions link1="link1" link2="link5" reason="adjacent"/>
+    <disable_collisions link1="link1" link2="link6" reason="adjacent"/>
+    <disable_collisions link1="link1" link2="link7" reason="adjacent"/>
+    <disable_collisions link1="link2" link2="link3" reason="adjacent"/>
+    <disable_collisions link1="link2" link2="link4" reason="adjacent"/>
+    <disable_collisions link1="link2" link2="link5" reason="adjacent"/>
+    <disable_collisions link1="link2" link2="link6" reason="adjacent"/>
+    <disable_collisions link1="link2" link2="link7" reason="adjacent"/>
+    <disable_collisions link1="link3" link2="link4" reason="adjacent"/>
+    <disable_collisions link1="link3" link2="link5" reason="adjacent"/>
+    <disable_collisions link1="link3" link2="link6" reason="adjacent"/>
+    <disable_collisions link1="link3" link2="link7" reason="adjacent"/>
+    <disable_collisions link1="link4" link2="link5" reason="adjacent"/>
+    <disable_collisions link1="link4" link2="link6" reason="adjacent"/>
+    <disable_collisions link1="link4" link2="link7" reason="adjacent"/>
+    <disable_collisions link1="link5" link2="link6" reason="adjacent"/>
+    <disable_collisions link1="link5" link2="link7" reason="adjacent"/>
+    <disable_collisions link1="link6" link2="link7" reason="adjacent"/>
 </robot>

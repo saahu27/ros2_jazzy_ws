@@ -23,7 +23,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'execute = puma560_py.execute:main',
+            'cartesian_motion = puma560_py.cartesian_motion:main',
+            'compliance_control = puma560_py.compliance_control:main',
         ],
     },
 )
