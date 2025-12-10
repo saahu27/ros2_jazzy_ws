@@ -67,4 +67,23 @@
     <selfCollide>false</selfCollide>
   </gazebo>
 
+  <!-- ========== FORCE/TORQUE SENSOR ========== -->
+  <!-- FT sensor at wrist joint (j6) for compliance control -->
+  <!-- Measures forces/torques between link6 and link7 (end-effector) -->
+  <!-- Note: Requires ignition-gazebo-forcetorque-system plugin in world file -->
+  <gazebo reference="j6">
+    <sensor name="ft_sensor" type="force_torque">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <visualize>false</visualize>
+      <topic>ft_sensor</topic>
+      <force_torque>
+        <!-- Frame: child = link7 (end-effector) -->
+        <frame>child</frame>
+        <!-- Measure direction: forces exerted ON the child link -->
+        <measure_direction>child_to_parent</measure_direction>
+      </force_torque>
+    </sensor>
+  </gazebo>
+
 </robot>

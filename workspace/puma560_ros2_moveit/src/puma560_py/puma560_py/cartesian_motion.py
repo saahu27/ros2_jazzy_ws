@@ -2,18 +2,12 @@
 """
  Cartesian Motion Controller with Trapezoidal Velocity Profiles
 
-This implementation achieves CONSTANT-VELOCITY Cartesian motion in the XY plane
-by using MoveIt's inverse kinematics service to compute joint angles at each
-timestep along a straight-line Cartesian path.
-
-- Joint-Space: q(t) = q_start + (q_end - q_start) * s(t)  → Curved Cartesian path
-- Cartesian:   x(t) = x_start + (x_end - x_start) * s(t)  → Straight Cartesian path
+- Cartesian:   x(t) = x_start + (x_end - x_start) * s(t) 
                 q(t) = IK(x(t))
 
 Theory Reference:
 - Craig, "Introduction to Robotics", Chapter 7: Trajectory Generation
 - Siciliano et al., "Robotics: Modelling, Planning and Control", Chapter 3
-- MoveIt motion planning framework documentation
 
 Author: Sahruday Patti
 """
@@ -28,9 +22,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.logging import get_logger
 from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
 
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped, Pose, Point, Quaternion
+from geometry_msgs.msg import PoseStamped, Pose, Quaternion
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from builtin_interfaces.msg import Duration
@@ -46,8 +41,94 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime
 
+# ============================================================
+# CONFIGURATION CONSTANTS
+# ============================================================
 # Results directory
-RESULTS_DIR = '/root/ros2_ws/src/puma560_ros2_moveit/src/puma560_py/results'
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results')
+
+# Motion parameters
+DEFAULT_V_MAX = 0.08       # Default max Cartesian velocity (m/s)
+DEFAULT_A_MAX = 0.15       # Default max Cartesian acceleration (m/s²)
+DEFAULT_LIFT_V_MAX = 0.1   # Default max velocity for lift motion (m/s)
+DEFAULT_DT = 0.02          # Trajectory sampling period (s) - 50 Hz
+
+# Pattern sizes for demo
+SQUARE_SIZE = 0.15         # Square pattern side length (m)
+TRIANGLE_SIZE = 0.12       # Triangle pattern side length (m)
+LINE_LENGTH = 0.2          # Line pattern length (m)
+LIFT_HEIGHT = 0.3          # Height change per lift phase (m)
+
+# IK tolerance
+MAX_IK_FAILURES = 5        # Maximum consecutive IK failures before aborting
+
+
+def quaternion_slerp(q0, q1, t):
+    """
+    Spherical Linear Interpolation (SLERP) between two quaternions.
+    
+    Implements the formula:
+        q(t) = q0 * (q0^(-1) * q1)^t
+    
+    Or equivalently using the geometric formula:
+        q(t) = (sin((1-t)*theta) * q0 + sin(t*theta) * q1) / sin(theta)
+    
+    where theta = arccos(q0 · q1)
+    
+    Reference: Shoemake, "Animating Rotation with Quaternion Curves", SIGGRAPH 1985
+    
+    Args:
+        q0: Starting quaternion as Quaternion message (x, y, z, w)
+        q1: Ending quaternion as Quaternion message (x, y, z, w)
+        t: Interpolation parameter [0, 1]
+        
+    Returns:
+        Interpolated Quaternion message
+    """
+    from geometry_msgs.msg import Quaternion
+    
+    # Convert to numpy arrays
+    v0 = np.array([q0.x, q0.y, q0.z, q0.w])
+    v1 = np.array([q1.x, q1.y, q1.z, q1.w])
+    
+    # Normalize
+    v0 = v0 / np.linalg.norm(v0)
+    v1 = v1 / np.linalg.norm(v1)
+    
+    # Compute dot product
+    dot = np.dot(v0, v1)
+    
+    # If quaternions are nearly the same, use linear interpolation
+    if dot > 0.9995:
+        result = v0 + t * (v1 - v0)
+        result = result / np.linalg.norm(result)
+    else:
+        # Ensure shortest path (flip q1 if necessary)
+        if dot < 0:
+            v1 = -v1
+            dot = -dot
+        
+        # Clamp dot to valid range for arccos
+        dot = np.clip(dot, -1.0, 1.0)
+        
+        # Calculate angle and interpolation
+        theta_0 = np.arccos(dot)
+        theta = theta_0 * t
+        
+        # Compute the orthogonal component
+        v2 = v1 - v0 * dot
+        v2 = v2 / np.linalg.norm(v2)
+        
+        # Final interpolated quaternion
+        result = v0 * np.cos(theta) + v2 * np.sin(theta)
+    
+    q_result = Quaternion()
+    q_result.x = result[0]
+    q_result.y = result[1]
+    q_result.z = result[2]
+    q_result.w = result[3]
+    
+    return q_result
 
 
 class TrapezoidalVelocityProfile:
@@ -156,10 +237,24 @@ class TrapezoidalVelocityProfile:
         return pos * self.sign, vel * self.sign, acc * self.sign
     
     def get_normalized(self, t):
-        """Get normalized position s(t) in [0, 1] and its derivative."""
+        """
+        Get normalized position s(t) in [0, 1] and its derivative ds/dt.
+        
+        The normalization accounts for signed distance:
+        - s(t) = pos(t) / |distance|, always in range [0, 1]
+        - ds/dt = vel(t) / |distance|, the rate of change of the interpolation parameter
+        
+        Note: pos and vel already include the sign from evaluate(), so we divide by
+        (distance * sign) which equals |distance| * sign * sign = |distance|.
+        This ensures s(t) is always positive and monotonically increasing.
+        
+        Returns:
+            tuple: (s, ds_dt) where s is the normalized position [0,1] and ds_dt is its derivative
+        """
         if self.distance < 1e-9:
             return 1.0, 0.0
         pos, vel, _ = self.evaluate(t)
+        # pos already has sign applied, dividing by (distance * sign) = |d| * sign^2 = |d|
         return pos / (self.distance * self.sign), vel / (self.distance * self.sign)
     
     def get_total_time(self):
@@ -208,7 +303,7 @@ class CartesianMotionController(Node):
         self.recorded_joint_positions = {name: [] for name in self.joint_names}
         self.recorded_joint_velocities = {name: [] for name in self.joint_names}
         self.recorded_cartesian_positions = {'x': [], 'y': [], 'z': []}
-        self.recorded_cartesian_velocities = {'x': [], 'y': [], 'z': []}
+        self.recorded_cartesian_velocities = {'vx': [], 'vy': [], 'vz': []}
         
         self.commanded_times = []
         self.commanded_joint_positions = {name: [] for name in self.joint_names}
@@ -286,32 +381,45 @@ class CartesianMotionController(Node):
             
         Returns:
             PoseStamped of end-effector, or None on failure
+            
+        Raises:
+            No exceptions raised - all errors return None with logging
         """
-        request = GetPositionFK.Request()
-        request.header = Header()
-        request.header.frame_id = self.base_frame
-        request.header.stamp = self.get_clock().now().to_msg()
-        
-        request.fk_link_names = [self.ee_link]
-        
-        # Set robot state
-        request.robot_state = RobotState()
-        request.robot_state.joint_state.name = self.joint_names
-        request.robot_state.joint_state.position = joint_positions.tolist()
-        
-        future = self.fk_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        
-        if future.result() is None:
-            self.get_logger().error("FK service call failed")
+        try:
+            request = GetPositionFK.Request()
+            request.header = Header()
+            request.header.frame_id = self.base_frame
+            request.header.stamp = self.get_clock().now().to_msg()
+            
+            request.fk_link_names = [self.ee_link]
+            
+            # Set robot state
+            request.robot_state = RobotState()
+            request.robot_state.joint_state.name = self.joint_names
+            request.robot_state.joint_state.position = joint_positions.tolist()
+            
+            future = self.fk_client.call_async(request)
+            
+            # Wait for future with timeout (executor handles spinning)
+            timeout = 2.0
+            start_wait = time.time()
+            while not future.done() and (time.time() - start_wait) < timeout:
+                time.sleep(0.01)
+            
+            if not future.done() or future.result() is None:
+                self.get_logger().error("FK service call failed: no response received")
+                return None
+            
+            response = future.result()
+            if response.error_code.val != MoveItErrorCodes.SUCCESS:
+                self.get_logger().error(f"FK failed with error code: {response.error_code.val}")
+                return None
+            
+            return response.pose_stamped[0]
+            
+        except Exception as e:
+            self.get_logger().error(f"FK service call exception: {e}")
             return None
-        
-        response = future.result()
-        if response.error_code.val != MoveItErrorCodes.SUCCESS:
-            self.get_logger().error(f"FK failed with error code: {response.error_code.val}")
-            return None
-        
-        return response.pose_stamped[0]
     
     def compute_ik(self, target_pose, seed_state=None):
         """
@@ -323,53 +431,66 @@ class CartesianMotionController(Node):
             
         Returns:
             Joint positions array [7], or None on failure
+            
+        Raises:
+            No exceptions raised - all errors return None with logging
         """
-        request = GetPositionIK.Request()
-        request.ik_request = PositionIKRequest()
-        request.ik_request.group_name = self.planning_group
-        
-        # Set target pose
-        if isinstance(target_pose, PoseStamped):
-            request.ik_request.pose_stamped = target_pose
-        else:
-            ps = PoseStamped()
-            ps.header.frame_id = self.base_frame
-            ps.header.stamp = self.get_clock().now().to_msg()
-            ps.pose = target_pose
-            request.ik_request.pose_stamped = ps
-        
-        # Set seed state
-        request.ik_request.robot_state = RobotState()
-        request.ik_request.robot_state.joint_state.name = self.joint_names
-        if seed_state is not None:
-            request.ik_request.robot_state.joint_state.position = seed_state.tolist()
-        elif self.current_positions is not None:
-            request.ik_request.robot_state.joint_state.position = self.current_positions.tolist()
-        else:
-            request.ik_request.robot_state.joint_state.position = [0.0] * 7
-        
-        request.ik_request.timeout = Duration(sec=1, nanosec=0)
-        
-        future = self.ik_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
-        
-        if future.result() is None:
-            self.get_logger().error("IK service call failed")
+        try:
+            request = GetPositionIK.Request()
+            request.ik_request = PositionIKRequest()
+            request.ik_request.group_name = self.planning_group
+            
+            # Set target pose
+            if isinstance(target_pose, PoseStamped):
+                request.ik_request.pose_stamped = target_pose
+            else:
+                ps = PoseStamped()
+                ps.header.frame_id = self.base_frame
+                ps.header.stamp = self.get_clock().now().to_msg()
+                ps.pose = target_pose
+                request.ik_request.pose_stamped = ps
+            
+            # Set seed state
+            request.ik_request.robot_state = RobotState()
+            request.ik_request.robot_state.joint_state.name = self.joint_names
+            if seed_state is not None:
+                request.ik_request.robot_state.joint_state.position = seed_state.tolist()
+            elif self.current_positions is not None:
+                request.ik_request.robot_state.joint_state.position = self.current_positions.tolist()
+            else:
+                request.ik_request.robot_state.joint_state.position = [0.0] * 7
+            
+            request.ik_request.timeout = Duration(sec=1, nanosec=0)
+            
+            future = self.ik_client.call_async(request)
+            
+            # Wait for future with timeout (executor handles spinning)
+            timeout = 2.0
+            start_wait = time.time()
+            while not future.done() and (time.time() - start_wait) < timeout:
+                time.sleep(0.01)
+            
+            if not future.done() or future.result() is None:
+                self.get_logger().error("IK service call failed: no response received")
+                return None
+            
+            response = future.result()
+            if response.error_code.val != MoveItErrorCodes.SUCCESS:
+                self.get_logger().warn(f"IK failed with error code: {response.error_code.val}")
+                return None
+            
+            # Extract joint positions in correct order
+            result = np.zeros(7)
+            for i, name in enumerate(self.joint_names):
+                if name in response.solution.joint_state.name:
+                    idx = response.solution.joint_state.name.index(name)
+                    result[i] = response.solution.joint_state.position[idx]
+            
+            return result
+            
+        except Exception as e:
+            self.get_logger().error(f"IK service call exception: {e}")
             return None
-        
-        response = future.result()
-        if response.error_code.val != MoveItErrorCodes.SUCCESS:
-            self.get_logger().warn(f"IK failed with error code: {response.error_code.val}")
-            return None
-        
-        # Extract joint positions in correct order
-        result = np.zeros(7)
-        for i, name in enumerate(self.joint_names):
-            if name in response.solution.joint_state.name:
-                idx = response.solution.joint_state.name.index(name)
-                result[i] = response.solution.joint_state.position[idx]
-        
-        return result
     
     def get_current_ee_pose(self):
         """Get current end-effector pose using FK."""
@@ -377,28 +498,42 @@ class CartesianMotionController(Node):
             return None
         return self.compute_fk(self.current_positions)
     
-    def interpolate_pose(self, start_pose, end_pose, s):
+    def interpolate_pose(self, start_pose, end_pose, s, use_slerp=False):
         """
-        Linearly interpolate between two poses.
+        Interpolate between two poses with linear position and optional SLERP orientation.
+        
+        Position interpolation is always linear:
+            p(s) = p_start + s * (p_end - p_start)
+        
+        Orientation interpolation can be:
+            - Fixed (default): Keep start orientation (for XY plane motion)
+            - SLERP: Spherical linear interpolation for smooth rotation
         
         Args:
             start_pose: Starting Pose
             end_pose: Ending Pose
             s: Interpolation parameter [0, 1]
+            use_slerp: If True, use SLERP for orientation; if False, keep start orientation
             
         Returns:
             Interpolated Pose
         """
         pose = Pose()
         
-        # Linear interpolation of position
+        # Linear interpolation of position (LERP)
         pose.position.x = start_pose.position.x + s * (end_pose.position.x - start_pose.position.x)
         pose.position.y = start_pose.position.y + s * (end_pose.position.y - start_pose.position.y)
         pose.position.z = start_pose.position.z + s * (end_pose.position.z - start_pose.position.z)
         
-        # SLERP for orientation (simplified - use start orientation for XY plane motion)
-        # For XY plane motion at constant orientation, we keep orientation fixed
-        pose.orientation = deepcopy(start_pose.orientation)
+        # Orientation interpolation
+        if use_slerp:
+            # Use SLERP for smooth orientation interpolation
+            # Useful when end-effector orientation needs to change during motion
+            pose.orientation = quaternion_slerp(start_pose.orientation, end_pose.orientation, s)
+        else:
+            # Keep start orientation fixed (default)
+            # Appropriate for XY plane motion at constant orientation
+            pose.orientation = deepcopy(start_pose.orientation)
         
         return pose
     
@@ -485,7 +620,7 @@ class CartesianMotionController(Node):
             
             if joint_positions is None:
                 ik_failures += 1
-                if ik_failures > 5:
+                if ik_failures > MAX_IK_FAILURES:
                     self.get_logger().error(f"Too many IK failures ({ik_failures}), aborting trajectory")
                     return None
                 # Skip this point and continue
@@ -580,10 +715,19 @@ class CartesianMotionController(Node):
         self.get_logger().info("Sending trajectory to controller...")
         future = self._action_client.send_goal_async(goal)
         
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        # Wait for goal acceptance with timeout (executor handles spinning)
+        timeout = 5.0
+        start_wait = time.time()
+        while not future.done() and (time.time() - start_wait) < timeout:
+            time.sleep(0.01)
+        
+        if not future.done():
+            self.get_logger().error("Timeout waiting for goal acceptance")
+            return False
+            
         goal_handle = future.result()
         
-        if not goal_handle.accepted:
+        if goal_handle is None or not goal_handle.accepted:
             self.get_logger().error("Trajectory goal rejected!")
             return False
         
@@ -591,14 +735,25 @@ class CartesianMotionController(Node):
         
         if wait:
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future, timeout_sec=60.0)
+            
+            # Wait for trajectory execution with longer timeout
+            timeout = 60.0
+            start_wait = time.time()
+            while not result_future.done() and (time.time() - start_wait) < timeout:
+                time.sleep(0.05)  # Slightly longer sleep for trajectory execution
+            
+            if not result_future.done():
+                self.get_logger().error("Timeout waiting for trajectory execution")
+                return False
+                
             result = result_future.result()
             
-            if result.result.error_code == 0:
+            if result is not None and result.result.error_code == 0:
                 self.get_logger().info("Trajectory execution SUCCEEDED")
                 return True
             else:
-                self.get_logger().error(f"Trajectory execution failed: {result.result.error_code}")
+                error_code = result.result.error_code if result else "unknown"
+                self.get_logger().error(f"Trajectory execution failed: {error_code}")
                 return False
         
         return True
@@ -658,7 +813,7 @@ class CartesianMotionController(Node):
         self.recorded_joint_positions = {name: [] for name in self.joint_names}
         self.recorded_joint_velocities = {name: [] for name in self.joint_names}
         self.recorded_cartesian_positions = {'x': [], 'y': [], 'z': []}
-        self.recorded_cartesian_velocities = {'x': [], 'y': [], 'z': []}
+        self.recorded_cartesian_velocities = {'vx': [], 'vy': [], 'vz': []}
         
         self.commanded_times = []
         self.commanded_joint_positions = {name: [] for name in self.joint_names}
@@ -912,6 +1067,9 @@ def main():
     
     The end-effector moves in STRAIGHT LINES in the XY plane at constant velocity,
     at multiple Z-heights adjusted via the lift joint.
+    
+    Uses MultiThreadedExecutor for proper thread safety when spinning the node
+    while also making service calls from the main thread.
     """
     rclpy.init()
     
@@ -930,15 +1088,19 @@ def main():
     # Create controller
     controller = CartesianMotionController()
     
-    # Spin in background with graceful shutdown handling
-    def spin_node():
+    # Use MultiThreadedExecutor for proper thread safety
+    # This avoids race conditions when making service calls while spinning
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(controller)
+    
+    # Spin executor in background thread
+    def spin_executor():
         try:
-            while rclpy.ok():
-                rclpy.spin_once(controller, timeout_sec=0.1)
+            executor.spin()
         except Exception:
             pass
     
-    spin_thread = threading.Thread(target=spin_node, daemon=True)
+    spin_thread = threading.Thread(target=spin_executor, daemon=True)
     spin_thread.start()
     
     # Wait for services
@@ -946,6 +1108,7 @@ def main():
     if not controller.wait_for_services(timeout=30.0):
         logger.error("MoveIt services not available. Is move_group running?")
         logger.error("  Try: ros2 launch puma560_description moveit.launch.py")
+        executor.shutdown()
         controller.destroy_node()
         rclpy.shutdown()
         return
@@ -960,6 +1123,7 @@ def main():
     current_pose = controller.get_current_ee_pose()
     if current_pose is None:
         logger.error("Could not get current end-effector pose!")
+        executor.shutdown()
         controller.destroy_node()
         rclpy.shutdown()
         return
@@ -971,11 +1135,11 @@ def main():
     controller.start_recording()
     
     # =========================================================
-    # MOTION PARAMETERS
+    # MOTION PARAMETERS (using configuration constants)
     # =========================================================
-    V_MAX = 0.08      # 8 cm/s - slow for clear visualization
-    A_MAX = 0.15      # 15 cm/s² acceleration
-    LIFT_V_MAX = 0.1  # 10 cm/s for lift motion
+    v_max = DEFAULT_V_MAX           # Cartesian velocity for XY motion
+    a_max = DEFAULT_A_MAX           # Cartesian acceleration
+    lift_v_max = DEFAULT_LIFT_V_MAX  # Velocity for lift (Z) motion
     
     # =========================================================
     # Get initial pose and define waypoints relative to it
@@ -993,41 +1157,38 @@ def main():
     logger.info("PHASE 1: Square pattern in XY plane (demonstrating straight-line motion)")
     logger.info("=" * 60)
     
-    # Define a square pattern (relative motion)
-    square_size = 0.15  # 15 cm square
+    # Define a square pattern (relative motion) using configuration constant
     square_waypoints = [
-        (base_x + square_size, base_y, base_z),                    # Right
-        (base_x + square_size, base_y + square_size, base_z),      # Up
-        (base_x, base_y + square_size, base_z),                    # Left
-        (base_x, base_y, base_z),                                  # Back to start
+        (base_x + SQUARE_SIZE, base_y, base_z),                      # Right
+        (base_x + SQUARE_SIZE, base_y + SQUARE_SIZE, base_z),        # Up
+        (base_x, base_y + SQUARE_SIZE, base_z),                      # Left
+        (base_x, base_y, base_z),                                    # Back to start
     ]
     
     for i, (x, y, z) in enumerate(square_waypoints):
         logger.info(f"  Moving to waypoint {i+1}: ({x:.3f}, {y:.3f}, {z:.3f})")
-        success = controller.move_to_xyz(x, y, z, v_max=V_MAX, a_max=A_MAX)
+        success = controller.move_to_xyz(x, y, z, v_max=v_max, a_max=a_max)
         if not success:
             logger.warn(f"  Failed to reach waypoint {i+1}")
-        time.sleep(0.5)
     
     # =========================================================
     # PHASE 2: Move lift UP (Z motion via lift joint)
     # =========================================================
     logger.info("\n" + "=" * 60)
-    logger.info("PHASE 2: Raise lift by 0.3m")
+    logger.info(f"PHASE 2: Raise lift by {LIFT_HEIGHT}m")
     logger.info("=" * 60)
     
     # Get current pose after square
     current_pose = controller.get_current_ee_pose()
     if current_pose:
-        new_z = current_pose.pose.position.z + 0.3
+        new_z = current_pose.pose.position.z + LIFT_HEIGHT
         logger.info(f"  Moving Z from {current_pose.pose.position.z:.3f} to {new_z:.3f}")
         controller.move_to_xyz(
             current_pose.pose.position.x,
             current_pose.pose.position.y,
             new_z,
-            v_max=LIFT_V_MAX, a_max=A_MAX
+            v_max=lift_v_max, a_max=a_max
         )
-    time.sleep(1.0)
     
     # =========================================================
     # PHASE 3: Triangle pattern at new height
@@ -1042,36 +1203,34 @@ def main():
         cy = current_pose.pose.position.y
         cz = current_pose.pose.position.z
         
-        tri_size = 0.12  # 12 cm triangle
+        # Equilateral triangle using configuration constant
         triangle_waypoints = [
-            (cx + tri_size, cy, cz),                           # Right
-            (cx + tri_size/2, cy + tri_size * 0.866, cz),      # Top (equilateral)
-            (cx, cy, cz),                                       # Back to start
+            (cx + TRIANGLE_SIZE, cy, cz),                                # Right
+            (cx + TRIANGLE_SIZE/2, cy + TRIANGLE_SIZE * 0.866, cz),      # Top (equilateral)
+            (cx, cy, cz),                                                 # Back to start
         ]
         
         for i, (x, y, z) in enumerate(triangle_waypoints):
             logger.info(f"  Moving to waypoint {i+1}: ({x:.3f}, {y:.3f}, {z:.3f})")
-            controller.move_to_xyz(x, y, z, v_max=V_MAX, a_max=A_MAX)
-            time.sleep(0.5)
+            controller.move_to_xyz(x, y, z, v_max=v_max, a_max=a_max)
     
     # =========================================================
     # PHASE 4: Move lift UP again
     # =========================================================
     logger.info("\n" + "=" * 60)
-    logger.info("PHASE 4: Raise lift another 0.3m")
+    logger.info(f"PHASE 4: Raise lift another {LIFT_HEIGHT}m")
     logger.info("=" * 60)
     
     current_pose = controller.get_current_ee_pose()
     if current_pose:
-        new_z = current_pose.pose.position.z + 0.3
+        new_z = current_pose.pose.position.z + LIFT_HEIGHT
         logger.info(f"  Moving Z from {current_pose.pose.position.z:.3f} to {new_z:.3f}")
         controller.move_to_xyz(
             current_pose.pose.position.x,
             current_pose.pose.position.y,
             new_z,
-            v_max=LIFT_V_MAX, a_max=A_MAX
+            v_max=lift_v_max, a_max=a_max
         )
-    time.sleep(1.0)
     
     # =========================================================
     # PHASE 5: Line pattern at top height
@@ -1086,23 +1245,20 @@ def main():
         cy = current_pose.pose.position.y
         cz = current_pose.pose.position.z
         
-        line_length = 0.2  # 20 cm line
         line_waypoints = [
-            (cx + line_length, cy, cz),    # Forward
-            (cx, cy, cz),                   # Back
-            (cx, cy + line_length, cz),     # Right
-            (cx, cy, cz),                   # Back
+            (cx + LINE_LENGTH, cy, cz),      # Forward
+            (cx, cy, cz),                     # Back
+            (cx, cy + LINE_LENGTH, cz),       # Right
+            (cx, cy, cz),                     # Back
         ]
         
         for i, (x, y, z) in enumerate(line_waypoints):
             logger.info(f"  Moving to waypoint {i+1}: ({x:.3f}, {y:.3f}, {z:.3f})")
-            controller.move_to_xyz(x, y, z, v_max=V_MAX, a_max=A_MAX)
-            time.sleep(0.3)
+            controller.move_to_xyz(x, y, z, v_max=v_max, a_max=a_max)
     
     # =========================================================
     # SAVE RESULTS
     # =========================================================
-    time.sleep(1.0)
     data = controller.stop_recording()
     
     logger.info("\n" + "=" * 60)
@@ -1116,16 +1272,12 @@ def main():
     plot_cartesian_motion(data, plot_path)
     
     logger.info(f"\nPlot saved to: {plot_path}")
-    logger.info("")
-    logger.info("KEY OBSERVATION:")
-    logger.info("  - Cartesian velocities show TRAPEZOIDAL profiles")
-    logger.info("  - XY trajectory shows STRAIGHT LINES")
-    logger.info("  - Joint velocities are NOT trapezoidal (expected!)")
-    logger.info("  This proves  Cartesian motion with constant velocity!")
     
-    # Cleanup - proper shutdown to avoid "terminate called without an active exception"
+    # Cleanup - proper shutdown with executor
     logger.info("\nShutting down...")
     try:
+        executor.shutdown()
+        controller.destroy_node()
         rclpy.shutdown()
     except Exception:
         pass

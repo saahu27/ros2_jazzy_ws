@@ -2,28 +2,26 @@
 <sdf version="1.8">
   <world name="wall_world">
     
-    <!-- Physics - using DART for prismatic joint support -->
-    <physics name="dart_physics" type="dart">
+    <!-- Physics - use default (not DART) for mesh collision support -->
+    <physics name="1ms" type="ignored">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
-      <real_time_update_rate>1000</real_time_update_rate>
     </physics>
     
-    <!-- Plugins -->
-    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics">
-      <engine>
-        <filename>gz-physics-dartsim-plugin</filename>
-      </engine>
-    </plugin>
+    <!-- Core system plugins -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
     
-    <!-- Lighting - straight down to avoid slanted shadows -->
+    <!-- Force/Torque sensor system - required for FT sensor on robot wrist -->
+    <plugin filename="gz-sim-forcetorque-system" name="gz::sim::systems::ForceTorque"/>
+    
+    <!-- Lighting -->
     <light type="directional" name="sun">
       <cast_shadows>false</cast_shadows>
       <pose>0 0 10 0 0 0</pose>
-      <diffuse>1.0 1.0 1.0 1</diffuse>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>
       <attenuation>
         <range>1000</range>
@@ -31,7 +29,7 @@
         <linear>0.01</linear>
         <quadratic>0.001</quadratic>
       </attenuation>
-      <direction>0 0 -1</direction>
+      <direction>-0.5 0.1 -0.9</direction>
     </light>
     
     <!-- Ground Plane -->
@@ -63,26 +61,43 @@
     </model>
     
     <!-- ============================================ -->
-    <!-- VERTICAL WALL - Simple box, no rotation     -->
-    <!-- Wall center: X=0.49, Y=0, Z=1.0             -->
-    <!-- Size: 0.1m thick (X), 2m wide (Y), 2m tall (Z) -->
-    <!-- Surface facing robot: X = 0.44m             -->
+    <!-- VERTICAL WALL for compliance control        -->
+    <!-- Wall center: X=0.92, Y=-0.15, Z=1.0         -->
+    <!-- Size: 0.1m thick (X), 2m wide (Y), 2m tall  -->
+    <!-- Surface facing robot: X = 0.87m             -->
+    <!-- Positioned just ahead of pre-contact pose   -->
     <!-- ============================================ -->
     <model name="wall">
-      <pose>0.49 0 1.0 0 0 0</pose>
+      <pose>0.92 -0.15 1.0 0 0 0</pose>
       <static>true</static>
       <link name="link">
-        <pose>0 0 0 0 0 0</pose>
         <collision name="collision">
-          <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
               <size>0.1 2.0 2.0</size>
             </box>
           </geometry>
+          <surface>
+            <friction>
+              <ode>
+                <mu>1.0</mu>
+                <mu2>1.0</mu2>
+              </ode>
+            </friction>
+            <!-- Soft contact for force control - lower kp = softer wall -->
+            <contact>
+              <ode>
+                <!-- Much softer contact: kp=1000 gives ~100N per 1cm penetration -->
+                <kp>1000</kp>
+                <kd>50</kd>
+                <!-- Constraint force mixing - higher = more compliant -->
+                <soft_cfm>0.01</soft_cfm>
+                <soft_erp>0.1</soft_erp>
+              </ode>
+            </contact>
+          </surface>
         </collision>
         <visual name="visual">
-          <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
               <size>0.1 2.0 2.0</size>
@@ -98,4 +113,3 @@
     
   </world>
 </sdf>
-
