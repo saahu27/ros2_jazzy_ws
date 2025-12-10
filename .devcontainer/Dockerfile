@@ -96,16 +96,12 @@ COPY .vscode /root/ros2_ws/.vscode
 # Note the docker/ prefix since we're in the parent context
 COPY .devcontainer/workspace.sh /root/
 COPY .devcontainer/entrypoint.sh /root/
-COPY .devcontainer/bash_aliases.txt /root/.bashrc_aliases
 COPY scripts/ /root/scripts/
 COPY container-setup-scripts/ /root/container-setup-scripts/
 
 # Make scripts executable
 RUN chmod +x /root/workspace.sh /root/entrypoint.sh
 RUN chmod +x /root/container-setup-scripts/*.sh
-
-# Add custom bash aliases
-RUN cat /root/.bashrc_aliases >> /root/.bashrc
 
 # Run the workspace setup script
 # This typically installs workspace dependencies and builds the ROS 2 packages

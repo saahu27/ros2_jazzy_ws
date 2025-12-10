@@ -96,8 +96,10 @@ CONTACT_THRESHOLD = 80.0 # Wait until force is near target
 WALL_X = 0.87           # Wall surface position (m)
 DURATION = 30.0         # Total duration (s)
 
-# Results directory
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results')
+
+# Results directory - mounted to host for persistence
+# This path is bind-mounted to ${localWorkspaceFolder}/results on the host
+DEFAULT_RESULTS_DIR = '/root/ros2_ws/src/puma560_ros2_moveit/results'
 
 
 class PositionBasedAdmittance(Node):
@@ -241,6 +243,14 @@ class PositionBasedAdmittance(Node):
             'duration',
             DURATION,
             ParameterDescriptor(description='Total control duration in seconds')
+        )
+        
+        self.declare_parameter(
+            'results_dir',
+            DEFAULT_RESULTS_DIR,
+            ParameterDescriptor(
+                description='Directory to save result plots. Use absolute path for Docker persistence.'
+            )
         )
     
     def _get_param(self, name):
@@ -627,9 +637,10 @@ class PositionBasedAdmittance(Node):
                      fontsize=12, fontweight='bold')
         plt.tight_layout()
         
-        os.makedirs(RESULTS_DIR, exist_ok=True)
+        results_dir = self._get_param('results_dir')
+        os.makedirs(results_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(RESULTS_DIR, f"admittance_{timestamp}.png")
+        path = os.path.join(results_dir, f"admittance_{timestamp}.png")
         plt.savefig(path, dpi=150, bbox_inches='tight')
         self.get_logger().info(f"Plot saved: {path}")
         plt.close()

@@ -4,7 +4,7 @@
   <name>puma560_py</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="cadlab@todo.todo">cadlab</maintainer>
+  <maintainer email="sahrudaypatti@gmail.com">sahruday patti</maintainer>
   <license>TODO: License declaration</license>
 
   <exec_depend>rclpy</exec_depend>

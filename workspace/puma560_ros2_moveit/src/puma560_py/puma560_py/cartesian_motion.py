@@ -44,14 +44,16 @@ from datetime import datetime
 # ============================================================
 # CONFIGURATION CONSTANTS
 # ============================================================
-# Results directory
-RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results')
+# Results directory - mounted to host for persistence
+# This path is bind-mounted to ${localWorkspaceFolder}/results on the host
+DEFAULT_RESULTS_DIR = '/root/ros2_ws/src/puma560_ros2_moveit/results'
 
 # Motion parameters
 DEFAULT_V_MAX = 0.08       # Default max Cartesian velocity (m/s)
 DEFAULT_A_MAX = 0.15       # Default max Cartesian acceleration (m/s²)
 DEFAULT_LIFT_V_MAX = 0.1   # Default max velocity for lift motion (m/s)
-DEFAULT_DT = 0.02          # Trajectory sampling period (s) - 50 Hz
+DEFAULT_J_MAX = 0.5        # Default max jerk (m/s³) for S-curve profile
+DEFAULT_DT = 0.008         # Trajectory sampling period (s) - 125 Hz for better tracking
 
 # Pattern sizes for demo
 SQUARE_SIZE = 0.15         # Square pattern side length (m)
@@ -1265,9 +1267,9 @@ def main():
     logger.info("GENERATING PLOTS")
     logger.info("=" * 60)
     
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    plot_path = os.path.join(RESULTS_DIR, f"cartesian_motion_{timestamp}.png")
+    plot_path = os.path.join(DEFAULT_RESULTS_DIR, f"cartesian_motion_{timestamp}.png")
     
     plot_cartesian_motion(data, plot_path)
     

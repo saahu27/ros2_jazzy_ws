@@ -63,6 +63,10 @@
 			}
 		},
 
-		"mounts": ["type=bind,source=/dev/bus/usb,target=/dev/bus/usb"],
+	"mounts": [
+		"type=bind,source=/dev/bus/usb,target=/dev/bus/usb",
+		"type=bind,source=${localWorkspaceFolder}/results,target=/root/ros2_ws/src/puma560_ros2_moveit/results,consistency=cached"
+	],
+
 		"remoteUser": "root"
 }
