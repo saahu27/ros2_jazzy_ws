@@ -75,12 +75,18 @@ def generate_launch_description():
     # =========================================================
     # ROBOT DESCRIPTION
     # =========================================================
+    # For compliance control: use low position gain (0.1), no velocity interfaces, and compliance controller config
+    # Low gain allows the robot to be compliant and respond to external forces
+    # Note: use_velocity_interface:=false to avoid control conflicts
     robot_description = ParameterValue(
         Command([
             "xacro ",
             LaunchConfiguration("model"),
             " is_ignition:=",
-            is_ignition
+            is_ignition,
+            " position_gain:=0.1",
+            " controller_config:=controller_compliance.yaml",
+            " use_velocity_interface:=false"
         ]),
         value_type=str
     )
@@ -127,7 +133,7 @@ def generate_launch_description():
     # =========================================================
     # Bridge FT sensor from Ignition to ROS 2
     # Topic in Ignition: /world/wall_world/model/puma560_robot/joint/j6/sensor/ft_sensor/wrench
-    # We use a simpler topic name via the URDF sensor definition
+    # use a simpler topic name via the URDF sensor definition
     gz_ros2_bridge_ft = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",

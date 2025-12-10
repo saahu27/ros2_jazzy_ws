@@ -1,19 +1,31 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="arduinobot">
 
+  <!-- Configurable parameters for different control modes -->
+  <!-- position_gain: Low (10.0) for compliance control, High (1000.0) for trapezoidal tracking -->
+  <!-- controller_config: "controller_compliance.yaml" for compliance, "controller_trapezoidal.yaml" for tracking -->
+  <xacro:arg name="position_gain" default="10.0"/>
+  <xacro:arg name="controller_config" default="controller.yaml"/>
+
   <!-- ROS 2 Control -->
   <gazebo>
     <!-- ROS 2 Humble -->
     <xacro:if value="$(arg is_ignition)">
       <plugin filename="ign_ros2_control-system" name="ign_ros2_control::IgnitionROS2ControlPlugin">
-        <parameters>$(find puma560_description)/config/controller.yaml</parameters>
+        <parameters>$(find puma560_description)/config/$(arg controller_config)</parameters>
+        <!-- Configurable position proportional gain -->
+        <!-- Low gain (10.0) for compliance, High gain (1000.0) for trapezoidal tracking -->
+        <position_proportional_gain>$(arg position_gain)</position_proportional_gain>
       </plugin>
     </xacro:if>
 
     <!-- ROS 2 Iron or above -->
     <xacro:unless value="$(arg is_ignition)">
       <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
-        <parameters>$(find puma560_description)/config/controller.yaml</parameters>
+        <parameters>$(find puma560_description)/config/$(arg controller_config)</parameters>
+        <!-- Configurable position proportional gain -->
+        <!-- Low gain (10.0) for compliance, High gain (1000.0) for trapezoidal tracking -->
+        <position_proportional_gain>$(arg position_gain)</position_proportional_gain>
       </plugin>
     </xacro:unless>
   </gazebo>

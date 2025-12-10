@@ -48,18 +48,16 @@ from datetime import datetime
 # This path is bind-mounted to ${localWorkspaceFolder}/results on the host
 DEFAULT_RESULTS_DIR = '/root/ros2_ws/src/puma560_ros2_moveit/results'
 
-# Motion parameters
-DEFAULT_V_MAX = 0.08       # Default max Cartesian velocity (m/s)
-DEFAULT_A_MAX = 0.15       # Default max Cartesian acceleration (m/s²)
-DEFAULT_LIFT_V_MAX = 0.1   # Default max velocity for lift motion (m/s)
-DEFAULT_J_MAX = 0.5        # Default max jerk (m/s³) for S-curve profile
-DEFAULT_DT = 0.008         # Trajectory sampling period (s) - 125 Hz for better tracking
+# Motion parameters - tuned for visible trapezoidal velocity profiles
+DEFAULT_V_MAX = 0.05       # Default max Cartesian velocity (m/s)
+DEFAULT_A_MAX = 0.5        # Default max Cartesian acceleration (m/s²)
+DEFAULT_LIFT_V_MAX = 0.08  # Default max velocity for lift motion (m/s)
+DEFAULT_DT = 0.005         # Trajectory sampling period (s) - 200 Hz
 
-# Pattern sizes for demo
-SQUARE_SIZE = 0.15         # Square pattern side length (m)
-TRIANGLE_SIZE = 0.12       # Triangle pattern side length (m)
-LINE_LENGTH = 0.2          # Line pattern length (m)
-LIFT_HEIGHT = 0.3          # Height change per lift phase (m)
+# Pattern sizes for demo - increased for longer constant-velocity cruise phases
+SQUARE_SIZE = 0.25         # Square pattern side length (m)
+LINE_LENGTH = 0.25         # Line pattern length (m)
+LIFT_HEIGHT = 0.20         # Height change per lift phase (m)
 
 # IK tolerance
 MAX_IK_FAILURES = 5        # Maximum consecutive IK failures before aborting
@@ -318,16 +316,30 @@ class CartesianMotionController(Node):
         self._last_cartesian_pos = None
         self._last_cartesian_time = None
         
+        # Pending trajectory data - stored during generation, timestamped at execution
+        self._pending_trajectory_data = None
+        
         self.get_logger().info("CartesianMotionController initialized")
         self.get_logger().info(f"  Planning group: {self.planning_group}")
         self.get_logger().info(f"  End-effector: {self.ee_link}")
     
     def _joint_state_callback(self, msg):
-        """Store current joint positions and record if enabled."""
+        """Store current joint positions and velocities, record if enabled.
+        
+        Uses msg.velocity directly when available (more accurate than numerical
+        differentiation). Falls back to differentiation if velocity not provided.
+        """
         positions = {}
+        velocities = {}
+        
+        # Check if velocity data is available in the message
+        has_velocity = len(msg.velocity) == len(msg.name)
+        
         for i, name in enumerate(msg.name):
             if name in self.joint_names:
                 positions[name] = msg.position[i]
+                if has_velocity:
+                    velocities[name] = msg.velocity[i]
         
         if len(positions) == len(self.joint_names):
             self.current_positions = np.array([positions[n] for n in self.joint_names])
@@ -338,15 +350,21 @@ class CartesianMotionController(Node):
             
             for i, name in enumerate(self.joint_names):
                 self.recorded_joint_positions[name].append(self.current_positions[i])
-                if len(self.recorded_joint_positions[name]) > 1:
-                    dt = self.recorded_times[-1] - self.recorded_times[-2]
-                    if dt > 0.001:
-                        vel = (self.recorded_joint_positions[name][-1] - 
-                               self.recorded_joint_positions[name][-2]) / dt
+                
+                # Use velocity from message if available (more accurate)
+                if has_velocity and name in velocities:
+                    vel = velocities[name]
+                else:
+                    # Fallback to numerical differentiation
+                    if len(self.recorded_joint_positions[name]) > 1:
+                        dt = self.recorded_times[-1] - self.recorded_times[-2]
+                        if dt > 0.001:
+                            vel = (self.recorded_joint_positions[name][-1] - 
+                                   self.recorded_joint_positions[name][-2]) / dt
+                        else:
+                            vel = 0.0
                     else:
                         vel = 0.0
-                else:
-                    vel = 0.0
                 self.recorded_joint_velocities[name].append(vel)
     
     def wait_for_services(self, timeout=10.0):
@@ -481,7 +499,7 @@ class CartesianMotionController(Node):
                 self.get_logger().warn(f"IK failed with error code: {response.error_code.val}")
                 return None
             
-            # Extract joint positions in correct order
+            # Extract joint positions in order
             result = np.zeros(7)
             for i, name in enumerate(self.joint_names):
                 if name in response.solution.joint_state.name:
@@ -598,6 +616,7 @@ class CartesianMotionController(Node):
         # Sample trajectory points
         t = 0.0
         prev_joints = seed_joints if seed_joints is not None else self.current_positions
+        prev_velocities = np.zeros(7)  # Track previous velocities for acceleration computation
         ik_failures = 0
         
         trajectory_poses = []  # Store for recording
@@ -635,7 +654,18 @@ class CartesianMotionController(Node):
             else:
                 joint_velocities = np.zeros(7)
             
+            # Compute joint accelerations using numerical differentiation of velocities
+            # This preserves the trapezoidal profile structure:
+            # - Constant positive acceleration during ramp-up
+            # - Zero acceleration during cruise
+            # - Constant negative acceleration during ramp-down
+            if t > 0:
+                joint_accelerations = (joint_velocities - prev_velocities) / dt
+            else:
+                joint_accelerations = np.zeros(7)
+            
             prev_joints = joint_positions.copy()
+            prev_velocities = joint_velocities.copy()
             
             # Store for commanded data
             trajectory_poses.append({
@@ -653,7 +683,7 @@ class CartesianMotionController(Node):
             point = JointTrajectoryPoint()
             point.positions = joint_positions.tolist()
             point.velocities = joint_velocities.tolist()
-            point.accelerations = [0.0] * 7  # Let controller handle accelerations
+            point.accelerations = joint_accelerations.tolist()
             
             sec = int(t)
             nanosec = int((t - sec) * 1e9)
@@ -681,24 +711,13 @@ class CartesianMotionController(Node):
         
         self.get_logger().info(f"Generated trajectory with {len(trajectory.points)} points")
         
-        # Store commanded data if recording
-        if self.recording and self.record_start_time is not None:
-            time_offset = time.time() - self.record_start_time
-            for i, point in enumerate(trajectory.points):
-                t_point = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
-                self.commanded_times.append(time_offset + t_point)
-                
-                for j, name in enumerate(self.joint_names):
-                    self.commanded_joint_positions[name].append(point.positions[j])
-                    self.commanded_joint_velocities[name].append(point.velocities[j])
-                
-                if i < len(trajectory_poses):
-                    self.commanded_cartesian_positions['x'].append(trajectory_poses[i]['x'])
-                    self.commanded_cartesian_positions['y'].append(trajectory_poses[i]['y'])
-                    self.commanded_cartesian_positions['z'].append(trajectory_poses[i]['z'])
-                    self.commanded_cartesian_velocities['vx'].append(trajectory_velocities[i]['vx'])
-                    self.commanded_cartesian_velocities['vy'].append(trajectory_velocities[i]['vy'])
-                    self.commanded_cartesian_velocities['vz'].append(trajectory_velocities[i]['vz'])
+        # Store trajectory data temporarily - will be timestamped at actual execution time
+        if self.recording:
+            self._pending_trajectory_data = {
+                'trajectory': trajectory,
+                'poses': trajectory_poses,
+                'velocities': trajectory_velocities
+            }
         
         return trajectory
     
@@ -734,6 +753,33 @@ class CartesianMotionController(Node):
             return False
         
         self.get_logger().info("Trajectory accepted, executing...")
+        
+        # Record commanded data NOW - at actual execution start time
+        if self.recording and self.record_start_time is not None and self._pending_trajectory_data is not None:
+            execution_start_time = time.time() - self.record_start_time
+            pending = self._pending_trajectory_data
+            traj_data = pending['trajectory']
+            poses = pending['poses']
+            velocities = pending['velocities']
+            
+            for i, point in enumerate(traj_data.points):
+                t_point = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
+                # Use execution start time instead of generation time
+                self.commanded_times.append(execution_start_time + t_point)
+                
+                for j, name in enumerate(self.joint_names):
+                    self.commanded_joint_positions[name].append(point.positions[j])
+                    self.commanded_joint_velocities[name].append(point.velocities[j])
+                
+                if i < len(poses):
+                    self.commanded_cartesian_positions['x'].append(poses[i]['x'])
+                    self.commanded_cartesian_positions['y'].append(poses[i]['y'])
+                    self.commanded_cartesian_positions['z'].append(poses[i]['z'])
+                    self.commanded_cartesian_velocities['vx'].append(velocities[i]['vx'])
+                    self.commanded_cartesian_velocities['vy'].append(velocities[i]['vy'])
+                    self.commanded_cartesian_velocities['vz'].append(velocities[i]['vz'])
+            
+            self._pending_trajectory_data = None
         
         if wait:
             result_future = goal_handle.get_result_async()
@@ -833,13 +879,17 @@ class CartesianMotionController(Node):
         self.get_logger().info(f"Stopped recording. {len(self.recorded_times)} samples")
         
         # Compute measured Cartesian positions using FK (post-processing)
+        # Use higher sample count (1000) for better velocity accuracy
+        # This captures high-frequency motion and avoids aliasing peak velocities
         self.get_logger().info("Computing measured Cartesian positions via FK...")
         measured_cart_x = []
         measured_cart_y = []
         measured_cart_z = []
         
-        # Sample every Nth point to avoid too many FK calls
-        sample_step = max(1, len(self.recorded_times) // 200)
+        # Sample up to 1000 points for better velocity resolution
+        # Higher sampling = more accurate velocity estimation via differentiation
+        target_samples = 1000
+        sample_step = max(1, len(self.recorded_times) // target_samples)
         sampled_indices = list(range(0, len(self.recorded_times), sample_step))
         sampled_times = []
         
@@ -852,12 +902,25 @@ class CartesianMotionController(Node):
                 measured_cart_z.append(pose.pose.position.z)
                 sampled_times.append(self.recorded_times[idx])
         
-        # Compute measured Cartesian velocities from positions
+        # Compute measured Cartesian velocities from positions using central difference
+        # Central difference: v[i] = (x[i+1] - x[i-1]) / (2*dt) is more accurate than forward diff
         measured_cart_vx = []
         measured_cart_vy = []
         measured_cart_vz = []
         for i in range(len(sampled_times)):
-            if i > 0:
+            if i > 0 and i < len(sampled_times) - 1:
+                # Central difference for interior points (more accurate)
+                dt = sampled_times[i+1] - sampled_times[i-1]
+                if dt > 0.001:
+                    measured_cart_vx.append((measured_cart_x[i+1] - measured_cart_x[i-1]) / dt)
+                    measured_cart_vy.append((measured_cart_y[i+1] - measured_cart_y[i-1]) / dt)
+                    measured_cart_vz.append((measured_cart_z[i+1] - measured_cart_z[i-1]) / dt)
+                else:
+                    measured_cart_vx.append(0.0)
+                    measured_cart_vy.append(0.0)
+                    measured_cart_vz.append(0.0)
+            elif i > 0:
+                # Forward difference for last point
                 dt = sampled_times[i] - sampled_times[i-1]
                 if dt > 0.001:
                     measured_cart_vx.append((measured_cart_x[i] - measured_cart_x[i-1]) / dt)
@@ -872,7 +935,7 @@ class CartesianMotionController(Node):
                 measured_cart_vy.append(0.0)
                 measured_cart_vz.append(0.0)
         
-        self.get_logger().info(f"  Computed FK for {len(sampled_times)} samples")
+        self.get_logger().info(f"  Computed FK for {len(sampled_times)} samples (target: {target_samples})")
         
         return {
             # Measured joint data (full resolution)
@@ -902,8 +965,22 @@ class CartesianMotionController(Node):
         }
 
 
-def smooth_signal(signal, window_size=15):
-    """Apply moving average smoothing."""
+# Standardized smoothing window size for all velocity signals
+SMOOTHING_WINDOW_SIZE = 11
+
+
+def smooth_signal(signal, window_size=None):
+    """Apply moving average smoothing.
+    
+    Args:
+        signal: Input signal array
+        window_size: Window size for moving average. If None, uses SMOOTHING_WINDOW_SIZE.
+    
+    Returns:
+        Smoothed signal
+    """
+    if window_size is None:
+        window_size = SMOOTHING_WINDOW_SIZE
     if len(signal) < window_size:
         return signal
     pad_size = window_size // 2
@@ -956,14 +1033,14 @@ def plot_cartesian_motion(data, output_path):
         vz = np.array(meas_cart_vel['vz'])
         min_len = min(len(vx), len(vy), len(vz), len(meas_cart_time))
         meas_speed = np.sqrt(vx[:min_len]**2 + vy[:min_len]**2 + vz[:min_len]**2)
-        # Smooth the measured data
-        meas_speed_smooth = smooth_signal(meas_speed, window_size=5)
+        # Smooth the measured data using standardized window size
+        meas_speed_smooth = smooth_signal(meas_speed)
         ax1.plot(meas_cart_time[:len(meas_speed_smooth)], meas_speed_smooth, 'r-', 
                 linewidth=2.5, label='MEASURED |V| (smoothed)', alpha=0.9)
     
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Speed (m/s)')
-    ax1.set_title('END-EFFECTOR SPEED: Measured (solid) vs Commanded (dashed)\n(Trapezoidal profile shows constant velocity during cruise phase)', 
+    ax1.set_title('END-EFFECTOR SPEED: Measured (solid) vs Commanded (dashed))', 
                   fontsize=12, fontweight='bold')
     ax1.legend(loc='upper right', fontsize=10)
     ax1.grid(True, alpha=0.3)
@@ -1036,9 +1113,9 @@ def plot_cartesian_motion(data, output_path):
                     color=color, linewidth=1.5, linestyle='--', 
                     label=f'{jname} (cmd)', alpha=0.7)
             max_vel = max(max_vel, np.max(np.abs(vel_clipped)))
-        # Measured
+        # Measured - use standardized smoothing window
         if jname in meas_joint_vel and len(meas_joint_vel[jname]) > 0:
-            vel_smooth = smooth_signal(meas_joint_vel[jname], window_size=15)
+            vel_smooth = smooth_signal(meas_joint_vel[jname])
             vel_smooth_clipped = np.clip(vel_smooth, -2.0, 2.0)
             ax3.plot(meas_time[:len(vel_smooth_clipped)], vel_smooth_clipped,
                     color=color, linewidth=2, linestyle='-', 
@@ -1059,6 +1136,7 @@ def plot_cartesian_motion(data, output_path):
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    os.chmod(output_path, 0o666)  # Make file deletable by any user (Docker permission fix)
     print(f"Plot saved to: {output_path}")
     plt.close()
 
@@ -1193,34 +1271,10 @@ def main():
         )
     
     # =========================================================
-    # PHASE 3: Triangle pattern at new height
+    # PHASE 3: Move lift UP again
     # =========================================================
     logger.info("\n" + "=" * 60)
-    logger.info("PHASE 3: Triangle pattern at elevated height")
-    logger.info("=" * 60)
-    
-    current_pose = controller.get_current_ee_pose()
-    if current_pose:
-        cx = current_pose.pose.position.x
-        cy = current_pose.pose.position.y
-        cz = current_pose.pose.position.z
-        
-        # Equilateral triangle using configuration constant
-        triangle_waypoints = [
-            (cx + TRIANGLE_SIZE, cy, cz),                                # Right
-            (cx + TRIANGLE_SIZE/2, cy + TRIANGLE_SIZE * 0.866, cz),      # Top (equilateral)
-            (cx, cy, cz),                                                 # Back to start
-        ]
-        
-        for i, (x, y, z) in enumerate(triangle_waypoints):
-            logger.info(f"  Moving to waypoint {i+1}: ({x:.3f}, {y:.3f}, {z:.3f})")
-            controller.move_to_xyz(x, y, z, v_max=v_max, a_max=a_max)
-    
-    # =========================================================
-    # PHASE 4: Move lift UP again
-    # =========================================================
-    logger.info("\n" + "=" * 60)
-    logger.info(f"PHASE 4: Raise lift another {LIFT_HEIGHT}m")
+    logger.info(f"PHASE 3: Raise lift another {LIFT_HEIGHT}m")
     logger.info("=" * 60)
     
     current_pose = controller.get_current_ee_pose()
@@ -1235,10 +1289,10 @@ def main():
         )
     
     # =========================================================
-    # PHASE 5: Line pattern at top height
+    # PHASE 4: Line pattern at top height
     # =========================================================
     logger.info("\n" + "=" * 60)
-    logger.info("PHASE 5: Back-and-forth line at top height")
+    logger.info("PHASE 4: Back-and-forth line at top height")
     logger.info("=" * 60)
     
     current_pose = controller.get_current_ee_pose()
@@ -1268,6 +1322,7 @@ def main():
     logger.info("=" * 60)
     
     os.makedirs(DEFAULT_RESULTS_DIR, exist_ok=True)
+    os.chmod(DEFAULT_RESULTS_DIR, 0o777)  # Make directory deletable by any user
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_path = os.path.join(DEFAULT_RESULTS_DIR, f"cartesian_motion_{timestamp}.png")
     

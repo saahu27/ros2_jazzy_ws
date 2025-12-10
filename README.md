@@ -9,7 +9,7 @@
 | Option | Requirements |
 |--------|--------------|
 | Dev Containers | VS Code, Dev Containers extension, Docker |
-| Docker | Docker with X11 forwarding capability |
+| Docker | Docker with X11 forwarding |
 | Native | ROS 2 Jazzy, Gazebo Harmonic, MoveIt 2 |
 
 ---
@@ -78,13 +78,22 @@
    colcon build
    source install/setup.bash
 
-   # Run demo
+   # Run cartesian motion demo
    ros2 launch puma560_py cartesian_motion.launch.py
+
+   # Compliance control demo
+   ros2 launch puma560_py compliance_control.launch.py
    ```
 
+4. **Result Plots**:
+   ```bash
+   cd workspace/results
+   ```
 ---
 
-## Option 3: Native ROS 2 Jazzy Installation
+ **Note* :  *Untested using Option3 (native), might have some trouble with dependencies*
+ 
+## Option 3: Native ROS 2 Jazzy Installation 
 
 1. **Prerequisites**: ROS 2 Jazzy with Gazebo Harmonic and MoveIt 2 installed.
 
@@ -117,8 +126,8 @@
 
 | Launch File | Description |
 |-------------|-------------|
-| `cartesian_motion.launch.py` | Gazebo + MoveIt + Cartesian waypoint demo (square → lift → triangle → lift → lines) |
-| `compliance_control.launch.py` | Gazebo with wall + MoveIt + force control demo (maintains 100N against wall) |
+| `cartesian_motion.launch.py` | Gazebo + MoveIt + Cartesian waypoint demo |
+| `compliance_control.launch.py` | Gazebo with wall + MoveIt + force control demo |
 
 ---
 
@@ -157,7 +166,7 @@ ros2_jazzy_ws/
 
 ---
 
-## Technical Details
+## Details
 
 ### Robot Configuration
 - **Arm**: PUMA560 6-DOF manipulator
@@ -165,7 +174,7 @@ ros2_jazzy_ws/
 - **Total DOF**: 7 (lift + 6 arm joints)
 
 ### Cartesian Motion
-- Trapezoidal velocity profile: acceleration → constant velocity → deceleration
+- Trapezoidal velocity profile
 - Default parameters: v_max = 0.08 m/s, a_max = 0.15 m/s²
 - IK computed via MoveIt `/compute_ik` service
 

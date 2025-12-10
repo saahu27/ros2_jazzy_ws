@@ -7,9 +7,6 @@ launch file starts everything needed:
 3. MoveIt move_group (provides IK/FK services)
 4. True Cartesian motion node
 
-Usage:
-  ros2 launch puma560_description true_cartesian_motion.launch.py
-
 """
 
 import os
@@ -71,12 +68,16 @@ def generate_launch_description():
     # =========================================================
     # ROBOT DESCRIPTION
     # =========================================================
+    # For trapezoidal velocity tracking: use high position gain, velocity interfaces, and trapezoidal controller config
     robot_description = ParameterValue(
         Command([
             "xacro ",
             LaunchConfiguration("model"),
             " is_ignition:=",
-            is_ignition
+            is_ignition,
+            " position_gain:=1000.0",
+            " controller_config:=controller_trapezoidal.yaml",
+            " use_velocity_interface:=true"
         ]),
         value_type=str
     )
@@ -248,6 +249,6 @@ def generate_launch_description():
         # RViz 
         delayed_rviz,
         
-        # True Cartesian motion
+        # Cartesian motion
         delayed_cartesian_motion,
     ])

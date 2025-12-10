@@ -639,9 +639,11 @@ class PositionBasedAdmittance(Node):
         
         results_dir = self._get_param('results_dir')
         os.makedirs(results_dir, exist_ok=True)
+        os.chmod(results_dir, 0o777)  # Make directory deletable by any user
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = os.path.join(results_dir, f"admittance_{timestamp}.png")
         plt.savefig(path, dpi=150, bbox_inches='tight')
+        os.chmod(path, 0o666)  # Make file deletable by any user (Docker permission fix)
         self.get_logger().info(f"Plot saved: {path}")
         plt.close()
 
