@@ -78,10 +78,10 @@ PRE_CONTACT_JOINTS = {
 F_DESIRED = 100.0       # Target contact force (N)
 KF_COMPLIANCE = 0.00003 # Compliance gain (m/N) - 0.03mm per Newton error
 CONTROL_HZ = 50.0       # Control rate (Hz)
-FILTER_ALPHA = 0.005    # VERY heavy filtering (τ ≈ 4s at 50Hz)
+FILTER_ALPHA = 0.005    # VERY heavy filtering (tau ≈ 4s at 50Hz)
 
 # Two-zone deadband for steady state
-DEADBAND_INNER = 8.0    # ±8N: True steady state (92-108N)
+DEADBAND_INNER = 8.0    # +/-8N: True steady state (92-108N)
 DEADBAND_OUTER = 20.0   # 8-20N below target: Slow correction zone
 DEADBAND_HIGH = 25.0    # Only retract if F > 125N
 
@@ -91,12 +91,12 @@ CORRECTION_SLOW = 0.00005  # Slow: 0.05mm/s for small errors (80-92N)
 
 # Contact establishment - wait until near target force
 APPROACH_VEL = 0.002    # Approach velocity (m/s) = 2mm/s
-CONTACT_THRESHOLD = 80.0 # Wait until force is near target (was 5.0)
+CONTACT_THRESHOLD = 80.0 # Wait until force is near target
 
 WALL_X = 0.87           # Wall surface position (m)
 DURATION = 30.0         # Total duration (s)
 
-# Results directory (relative to this module's location)
+# Results directory
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results')
 
 

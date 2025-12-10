@@ -1,7 +1,7 @@
 """
-Combined launch file for TRUE Cartesian Motion demonstration.
+Combined launch file for Cartesian Motion demonstration.
 
-This single launch file starts everything needed:
+launch file starts everything needed:
 1. Gazebo simulation with the PUMA560 robot + lift
 2. ros2_control controllers (joint_state_broadcaster, arm_controller)
 3. MoveIt move_group (provides IK/FK services)
@@ -10,8 +10,6 @@ This single launch file starts everything needed:
 Usage:
   ros2 launch puma560_description true_cartesian_motion.launch.py
 
-Optional: Disable RViz for headless operation:
-  ros2 launch puma560_description true_cartesian_motion.launch.py use_rviz:=false
 """
 
 import os
@@ -53,7 +51,7 @@ def generate_launch_description():
     
     use_rviz_arg = DeclareLaunchArgument(
         name="use_rviz",
-        default_value="true",
+        default_value="false",
         description="Whether to start RViz"
     )
     
@@ -118,7 +116,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # ROS2 CONTROLLERS (delayed to wait for Gazebo)
+    # ROS2 CONTROLLERS
     # =========================================================
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
@@ -152,7 +150,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # MOVEIT (delayed to wait for controllers)
+    # MOVEIT
     # =========================================================
     moveit_config = (
         MoveItConfigsBuilder("puma560", package_name="puma560_description")
@@ -181,7 +179,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # RVIZ (optional, delayed)
+    # RVIZ
     # =========================================================
     rviz_config = os.path.join(puma560_description, "config", "moveit.rviz")
     
@@ -207,7 +205,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # CARTESIAN MOTION NODE (delayed to wait for everything)
+    # CARTESIAN MOTION NODE
     # =========================================================
     cartesian_motion_node = Node(
         package="puma560_py",
@@ -240,16 +238,16 @@ def generate_launch_description():
         gz_spawn_entity,
         gz_ros2_bridge,
         
-        # Controllers (delayed)
+        # Controllers
         delayed_joint_state_broadcaster,
         delayed_arm_controller,
         
-        # MoveIt (delayed)
+        # MoveIt
         delayed_move_group,
         
-        # RViz (delayed, optional)
+        # RViz 
         delayed_rviz,
         
-        # True Cartesian motion (delayed)
+        # True Cartesian motion
         delayed_cartesian_motion,
     ])

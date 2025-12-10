@@ -5,17 +5,9 @@ This launch file sets up the environment for force-controlled interaction:
 1. Gazebo simulation with wall_world (includes wall for pushing against)
 2. ros2_control controllers (joint_state_broadcaster, arm_controller)
 3. MoveIt move_group (provides IK/FK services)
-4. Force/Torque sensor bridge (Ignition topic → ROS 2 topic)
-5. Compliance control node (when implemented)
+4. Force/Torque sensor bridge (Ignition topic to ROS 2 topic)
+5. Compliance control node
 
-Usage:
-  ros2 launch puma560_py compliance_control.launch.py
-
-Test FT sensor:
-  ros2 launch puma560_py compliance_control.launch.py run_controller:=false
-  ros2 topic echo /ft_sensor
-
-Author: Generated for compliance control implementation
 """
 
 import os
@@ -94,7 +86,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # GAZEBO SIMULATION (with wall world)
+    # GAZEBO SIMULATION
     # =========================================================
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
@@ -147,7 +139,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # ROS2 CONTROLLERS (delayed to wait for Gazebo)
+    # ROS2 CONTROLLERS
     # =========================================================
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
@@ -181,7 +173,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # MOVEIT (delayed to wait for controllers)
+    # MOVEIT
     # =========================================================
     moveit_config = (
         MoveItConfigsBuilder("puma560", package_name="puma560_description")
@@ -210,7 +202,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # RVIZ (optional, delayed)
+    # RVIZ
     # =========================================================
     rviz_config = os.path.join(puma560_description, "config", "moveit.rviz")
     
@@ -236,7 +228,7 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # COMPLIANCE CONTROL NODE (optional, delayed)
+    # COMPLIANCE CONTROL NODE
     # =========================================================
     compliance_control_node = Node(
         package="puma560_py",
@@ -274,16 +266,16 @@ def generate_launch_description():
         # Force/Torque sensor bridge
         gz_ros2_bridge_ft,
         
-        # Controllers (delayed)
+        # Controllers
         delayed_joint_state_broadcaster,
         delayed_arm_controller,
         
-        # MoveIt (delayed)
+        # MoveIt
         delayed_move_group,
         
-        # RViz (delayed, optional)
+        # RViz
         delayed_rviz,
         
-        # Compliance control (delayed, optional)
+        # Compliance control
         delayed_compliance_control,
     ])
