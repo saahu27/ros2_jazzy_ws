@@ -1,7 +1,7 @@
 {
-	"name": "ROS 2 Jazzy + Gazebo (Linux)",
-	"dockerFile": "docker/Dockerfile",
-	"context": "../",
+	"name": "ROS 2 Jazzy + Gazebo (macOS noVNC)",
+	"dockerFile": "../docker/Dockerfile",
+	"context": "../../",
 	"build": {
 		"args": {
 			"WORKSPACE": "/root/ros2_ws",
@@ -14,43 +14,51 @@
 
 	"runArgs": [
 		"--platform=linux/amd64",
-		"--network=host",
 		"--cap-add=SYS_PTRACE",
-		"--security-opt=seccomp:unconfined",
-		"--security-opt=apparmor:unconfined"
+		"--security-opt=seccomp:unconfined"
 	],
 
+	"forwardPorts": [6080],
+	"portsAttributes": {
+		"6080": {
+			"label": "noVNC (Gazebo GUI)",
+			"onAutoForward": "notify"
+		}
+	},
+
 	"containerEnv": { 
-		"DISPLAY": "${localEnv:DISPLAY}",
+		"DISPLAY": ":99",
 		"QT_X11_NO_MITSHM": "1",
 		"LIBGL_ALWAYS_SOFTWARE": "1",
 		"MESA_LOADER_DRIVER_OVERRIDE": "llvmpipe",
 		"MESA_GL_VERSION_OVERRIDE": "3.3",
-		"MESA_GLSL_VERSION_OVERRIDE": "330"
-    },
+		"MESA_GLSL_VERSION_OVERRIDE": "330",
+		"GALLIUM_DRIVER": "llvmpipe"
+	},
 
-	"initializeCommand": "xhost +local:docker 2>/dev/null || true",
+	// noVNC packages are pre-installed in Dockerfile
+	// Run startup script when VS Code attaches
+	"postAttachCommand": "nohup /root/start-vnc.sh > /tmp/vnc-startup.log 2>&1 & sleep 15",
 
 	"customizations": {
 		"vscode": {
-				"settings": {
+			"settings": {
 				"terminal.integrated.defaultProfile.linux": "bash"
-				},
-				"extensions": [
-					"ms-python.python",
-					"ms-iot.vscode-ros",
-					"ms-toolsai.jupyter",
-					"ms-azuretools.vscode-docker",
-					"ms-vscode.cmake-tools",
+			},
+			"extensions": [
+				"ms-python.python",
+				"ms-iot.vscode-ros",
+				"ms-toolsai.jupyter",
+				"ms-azuretools.vscode-docker",
+				"ms-vscode.cmake-tools",
 				"ms-vscode.cpptools"
-				]
-			}
-		},
+			]
+		}
+	},
 
 	"mounts": [
-		"type=bind,source=/tmp/.X11-unix,target=/tmp/.X11-unix",
 		"type=bind,source=${localWorkspaceFolder}/results,target=/root/ros2_ws/src/puma560_ros2_moveit/results,consistency=cached"
 	],
 
-		"remoteUser": "root"
+	"remoteUser": "root"
 }

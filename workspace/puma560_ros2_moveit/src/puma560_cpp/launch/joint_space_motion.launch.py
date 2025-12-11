@@ -1,12 +1,12 @@
 """
-Combined launch file for Cartesian Motion demonstration.
+C++ Joint Space Motion Launch File.
 
-launch file starts everything needed:
-1. Gazebo simulation with the PUMA560 robot + lift
+Launches the C++ implementation of joint space motion with:
+1. Gazebo simulation with PUMA560 robot + lift
 2. ros2_control controllers (joint_state_broadcaster, arm_controller)
-3. MoveIt move_group (provides IK/FK services)
-4. True Cartesian motion node
+3. C++ joint space motion node with per-joint trapezoidal profiles
 
+Uses velocity command interfaces for proper trapezoidal velocity profile tracking.
 """
 
 import os
@@ -18,18 +18,15 @@ from launch.actions import (
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
-    RegisterEventHandler,
 )
-from launch.event_handlers import OnProcessStart
-from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command, LaunchConfiguration
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 from ament_index_python.packages import get_package_share_directory
-from moveit_configs_utils import MoveItConfigsBuilder
 
 
 def generate_launch_description():
@@ -52,12 +49,6 @@ def generate_launch_description():
         description="Whether to start RViz"
     )
     
-    use_cpp_arg = DeclareLaunchArgument(
-        name="use_cpp",
-        default_value="false",
-        description="Whether to use C++ implementation instead of Python"
-    )
-    
     # =========================================================
     # ENVIRONMENT SETUP
     # =========================================================
@@ -66,7 +57,6 @@ def generate_launch_description():
         value=[str(Path(puma560_description).parent.resolve())]
     )
     
-    # ROS distro detection for Gazebo compatibility
     ros_distro = os.environ.get("ROS_DISTRO", "humble")
     is_ignition = "True" if ros_distro == "humble" else "False"
     physics_engine = "" if ros_distro == "humble" else "--physics-engine gz-physics-dartsim-plugin"
@@ -74,7 +64,6 @@ def generate_launch_description():
     # =========================================================
     # ROBOT DESCRIPTION
     # =========================================================
-    # For trapezoidal velocity tracking: use high position gain, velocity interfaces, and trapezoidal controller config
     robot_description = ParameterValue(
         Command([
             "xacro ",
@@ -145,7 +134,6 @@ def generate_launch_description():
         ],
     )
     
-    # Delay controllers to let Gazebo start
     delayed_joint_state_broadcaster = TimerAction(
         period=3.0,
         actions=[joint_state_broadcaster_spawner]
@@ -157,38 +145,9 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # MOVEIT
+    # RVIZ (optional)
     # =========================================================
-    moveit_config = (
-        MoveItConfigsBuilder("puma560", package_name="puma560_description")
-        .robot_description(file_path=os.path.join(puma560_description, "urdf", "puma560_robot.urdf"))
-        .robot_description_semantic(file_path="config/puma560.srdf")
-        .trajectory_execution(file_path="config/moveit_controllers.yaml")
-        .to_moveit_configs()
-    )
-    
-    move_group_node = Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
-        output="screen",
-        parameters=[
-            moveit_config.to_dict(),
-            {"use_sim_time": True},
-            {"publish_robot_description_semantic": True}
-        ],
-        arguments=["--ros-args", "--log-level", "warn"],
-    )
-    
-    # Delay MoveIt to let controllers start
-    delayed_move_group = TimerAction(
-        period=6.0,
-        actions=[move_group_node]
-    )
-    
-    # =========================================================
-    # RVIZ
-    # =========================================================
-    rviz_config = os.path.join(puma560_description, "config", "moveit.rviz")
+    rviz_config = os.path.join(puma560_description, "rviz", "display.rviz")
     
     rviz_node = Node(
         package="rviz2",
@@ -196,84 +155,45 @@ def generate_launch_description():
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config],
-        parameters=[
-            moveit_config.robot_description,
-            moveit_config.robot_description_semantic,
-            moveit_config.robot_description_kinematics,
-            moveit_config.joint_limits,
-            {"use_sim_time": True}
-        ],
+        parameters=[{"use_sim_time": True}],
         condition=IfCondition(LaunchConfiguration("use_rviz"))
     )
     
     delayed_rviz = TimerAction(
-        period=8.0,
+        period=6.0,
         actions=[rviz_node]
     )
     
     # =========================================================
-    # CARTESIAN MOTION NODE (Python or C++ based on use_cpp)
+    # C++ JOINT SPACE MOTION NODE
     # =========================================================
-    # Python implementation
-    cartesian_motion_node_py = Node(
-        package="puma560_py",
-        executable="cartesian_motion",
-        name="cartesian_motion",
-        output="screen",
-        parameters=[{"use_sim_time": True}],
-        condition=UnlessCondition(LaunchConfiguration("use_cpp"))
-    )
-    
-    # C++ implementation
-    cartesian_motion_node_cpp = Node(
+    joint_space_motion_node = Node(
         package="puma560_cpp",
-        executable="cartesian_motion",
-        name="cartesian_motion",
+        executable="joint_space_motion",
+        name="joint_space_motion",
         output="screen",
-        parameters=[{"use_sim_time": True}],
-        condition=IfCondition(LaunchConfiguration("use_cpp"))
+        parameters=[{"use_sim_time": True}]
     )
     
-    # Delay motion node to let MoveIt fully initialize
-    delayed_cartesian_motion_py = TimerAction(
-        period=12.0,
-        actions=[cartesian_motion_node_py]
-    )
-    
-    delayed_cartesian_motion_cpp = TimerAction(
-        period=12.0,
-        actions=[cartesian_motion_node_cpp]
+    delayed_joint_space_motion = TimerAction(
+        period=8.0,
+        actions=[joint_space_motion_node]
     )
     
     # =========================================================
     # LAUNCH DESCRIPTION
     # =========================================================
     return LaunchDescription([
-        # Arguments
         model_arg,
         use_rviz_arg,
-        use_cpp_arg,
-        
-        # Environment
         gazebo_resource_path,
-        
-        # Gazebo simulation
         robot_state_publisher_node,
         gazebo,
         gz_spawn_entity,
         gz_ros2_bridge,
-        
-        # Controllers
         delayed_joint_state_broadcaster,
         delayed_arm_controller,
-        
-        # MoveIt
-        delayed_move_group,
-        
-        # RViz 
         delayed_rviz,
-        
-        # Cartesian motion (Python or C++ based on use_cpp argument)
-        delayed_cartesian_motion_py,
-        delayed_cartesian_motion_cpp,
+        delayed_joint_space_motion,
     ])
+

@@ -80,6 +80,19 @@ RUN apt-get update && \
         libegl-dev \
         libgles-dev
 
+# Install noVNC packages for macOS GUI support (also available on Linux if needed)
+# These packages enable browser-based GUI access via VNC
+RUN apt-get update && \
+    apt-get install -y \
+        xvfb \
+        x11vnc \
+        novnc \
+        python3-websockify \
+        openbox \
+        xterm \
+        fonts-dejavu \
+        dbus-x11
+
 # Create necessary directories
 RUN mkdir -p /etc/udev/rules.d && \
     mkdir -p /root/ros2_ws && \
@@ -92,15 +105,15 @@ RUN mkdir -p /etc/udev/rules.d && \
 # COPY workspace/ /root/ros2_ws/src/
 COPY .vscode /root/ros2_ws/.vscode
 
-# Copy configuration files from docker directory
-# Note the docker/ prefix since we're in the parent context
-COPY .devcontainer/workspace.sh /root/
-COPY .devcontainer/entrypoint.sh /root/
+# Copy configuration files from devcontainer directories
+COPY .devcontainer/docker/workspace.sh /root/
+COPY .devcontainer/docker/entrypoint.sh /root/
+COPY .devcontainer/scripts/start-vnc.sh /root/
 COPY scripts/ /root/scripts/
 COPY container-setup-scripts/ /root/container-setup-scripts/
 
 # Make scripts executable
-RUN chmod +x /root/workspace.sh /root/entrypoint.sh
+RUN chmod +x /root/workspace.sh /root/entrypoint.sh /root/start-vnc.sh
 RUN chmod +x /root/container-setup-scripts/*.sh
 
 # Run the workspace setup script

@@ -16,13 +16,14 @@ from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
     TimerAction,
 )
 from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -55,6 +56,12 @@ def generate_launch_description():
         name="run_controller",
         default_value="true",
         description="Whether to run the compliance controller node"
+    )
+    
+    use_cpp_arg = DeclareLaunchArgument(
+        name="use_cpp",
+        default_value="false",
+        description="Whether to use C++ implementation instead of Python"
     )
     
     # =========================================================
@@ -234,9 +241,10 @@ def generate_launch_description():
     )
     
     # =========================================================
-    # COMPLIANCE CONTROL NODE
+    # COMPLIANCE CONTROL NODE (Python or C++ based on use_cpp)
     # =========================================================
-    compliance_control_node = Node(
+    # Python implementation
+    compliance_control_node_py = Node(
         package="puma560_py",
         executable="compliance_control",
         name="compliance_control",
@@ -245,10 +253,27 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("run_controller"))
     )
     
+    # C++ implementation
+    compliance_control_node_cpp = Node(
+        package="puma560_cpp",
+        executable="compliance_control",
+        name="compliance_control",
+        output="screen",
+        parameters=[{"use_sim_time": True}],
+        condition=IfCondition(LaunchConfiguration("run_controller"))
+    )
+    
     # Delay compliance node to let everything initialize
-    delayed_compliance_control = TimerAction(
+    delayed_compliance_control_py = TimerAction(
         period=12.0,
-        actions=[compliance_control_node]
+        actions=[GroupAction([compliance_control_node_py], 
+                             condition=UnlessCondition(LaunchConfiguration("use_cpp")))]
+    )
+    
+    delayed_compliance_control_cpp = TimerAction(
+        period=12.0,
+        actions=[GroupAction([compliance_control_node_cpp],
+                             condition=IfCondition(LaunchConfiguration("use_cpp")))]
     )
     
     # =========================================================
@@ -259,6 +284,7 @@ def generate_launch_description():
         model_arg,
         use_rviz_arg,
         run_controller_arg,
+        use_cpp_arg,
         
         # Environment
         gazebo_resource_path,
@@ -282,6 +308,7 @@ def generate_launch_description():
         # RViz
         delayed_rviz,
         
-        # Compliance control
-        delayed_compliance_control,
+        # Compliance control (Python or C++ based on use_cpp argument)
+        delayed_compliance_control_py,
+        delayed_compliance_control_cpp,
     ])
