@@ -656,8 +656,22 @@ class JointTrajectoryExecutor(Node):
         return self.execute_trajectory(trajectory)
 
 
-def smooth_signal(signal, window_size=15):
-    """Apply moving average smoothing to reduce noise."""
+# Standardized smoothing window size for all velocity signals (matching cartesian_motion.py)
+SMOOTHING_WINDOW_SIZE = 11
+
+
+def smooth_signal(signal, window_size=None):
+    """Apply moving average smoothing to reduce noise.
+    
+    Args:
+        signal: Input signal array
+        window_size: Window size for moving average. If None, uses SMOOTHING_WINDOW_SIZE.
+    
+    Returns:
+        Smoothed signal
+    """
+    if window_size is None:
+        window_size = SMOOTHING_WINDOW_SIZE
     if len(signal) < window_size:
         return signal
     
@@ -695,7 +709,7 @@ def plot_velocities_corrected(data, output_path):
                     'b-', linewidth=3, label='COMMANDED (ideal)', alpha=0.9)
     if 'lift_joint' in data['velocities']:
         vel = data['velocities']['lift_joint']
-        vel_smooth = smooth_signal(vel, window_size=21)
+        vel_smooth = smooth_signal(vel)
         ax1.plot(measured_time[:len(vel_smooth)], vel_smooth, 
                 'r-', linewidth=1.5, label='MEASURED (smoothed)', alpha=0.7)
     ax1.set_ylabel('Velocity (m/s)')
@@ -725,7 +739,7 @@ def plot_velocities_corrected(data, output_path):
     for i, jname in enumerate(['j1', 'j2', 'j3', 'j4', 'j5', 'j6']):
         if jname in data['velocities']:
             vel = data['velocities'][jname]
-            vel_smooth = smooth_signal(vel, window_size=21)
+            vel_smooth = smooth_signal(vel)
             ax3.plot(measured_time[:len(vel_smooth)], vel_smooth,
                     color=colors[i], linewidth=1.5, label=jname, alpha=0.8)
     ax3.set_ylabel('Velocity (rad/s)')
@@ -809,8 +823,11 @@ def main():
     executor_node.start_recording()
     
     # Velocity and acceleration scaling
-    V_SCALE = 0.5
-    A_SCALE = 0.5
+    # Lower V_SCALE ensures we can reach cruise phase for shorter motions
+    # Min distance for trapezoidal = (v_max*V_SCALE)² / (a_max*A_SCALE)
+    # With V_SCALE=0.25, A_SCALE=0.8: min_dist = (2.0*0.25)² / (5.0*0.8) = 0.125 rad ≈ 7°
+    V_SCALE = 0.25  # Lower velocity to ensure trapezoidal profiles
+    A_SCALE = 0.8   # Higher acceleration for snappier motion
     
     # Helper to create waypoint vector
     def make_waypoint(lift, j1, j2, j3, j4, j5, j6):

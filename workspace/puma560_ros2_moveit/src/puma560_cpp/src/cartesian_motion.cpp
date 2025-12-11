@@ -92,6 +92,9 @@ void CartesianMotion::jointStateCallback(const sensor_msgs::msg::JointState::Sha
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
 
+  // Check if velocity data is available in the message (like Python)
+  bool has_velocity = (msg->velocity.size() == msg->name.size());
+
   // Extract positions for our joints
   for (size_t i = 0; i < msg->name.size(); ++i) {
     auto it = std::find(ALL_JOINT_NAMES.begin(), ALL_JOINT_NAMES.end(), msg->name[i]);
@@ -121,24 +124,33 @@ void CartesianMotion::jointStateCallback(const sensor_msgs::msg::JointState::Sha
     double t = now() - record_start_time_;
     recorded_times_.push_back(t);
 
-    for (size_t i = 0; i < ALL_JOINT_NAMES.size(); ++i) {
-      const auto& name = ALL_JOINT_NAMES[i];
-      recorded_joint_positions_[name].push_back(current_positions_(i));
+    for (size_t i = 0; i < msg->name.size(); ++i) {
+      const auto& msg_name = msg->name[i];
+      auto it = std::find(ALL_JOINT_NAMES.begin(), ALL_JOINT_NAMES.end(), msg_name);
+      if (it != ALL_JOINT_NAMES.end()) {
+        size_t joint_idx = std::distance(ALL_JOINT_NAMES.begin(), it);
+        recorded_joint_positions_[msg_name].push_back(current_positions_(joint_idx));
 
-      // Compute velocity from position derivative (like Python)
-      if (recorded_joint_positions_[name].size() > 1) {
-        size_t n = recorded_times_.size();
-        double dt_meas = recorded_times_[n-1] - recorded_times_[n-2];
-        if (dt_meas > 0.001) {
-          size_t pos_n = recorded_joint_positions_[name].size();
-          double vel = (recorded_joint_positions_[name][pos_n-1] - 
-                        recorded_joint_positions_[name][pos_n-2]) / dt_meas;
-          recorded_joint_velocities_[name].push_back(vel);
+        // Use velocity from message if available (more accurate, like Python)
+        if (has_velocity) {
+          recorded_joint_velocities_[msg_name].push_back(msg->velocity[i]);
         } else {
-          recorded_joint_velocities_[name].push_back(0.0);
+          // Fallback to numerical differentiation
+          if (recorded_joint_positions_[msg_name].size() > 1) {
+            size_t n = recorded_times_.size();
+            double dt_meas = recorded_times_[n-1] - recorded_times_[n-2];
+            if (dt_meas > 0.001) {
+              size_t pos_n = recorded_joint_positions_[msg_name].size();
+              double vel = (recorded_joint_positions_[msg_name][pos_n-1] - 
+                            recorded_joint_positions_[msg_name][pos_n-2]) / dt_meas;
+              recorded_joint_velocities_[msg_name].push_back(vel);
+            } else {
+              recorded_joint_velocities_[msg_name].push_back(0.0);
+            }
+          } else {
+            recorded_joint_velocities_[msg_name].push_back(0.0);
+          }
         }
-      } else {
-        recorded_joint_velocities_[name].push_back(0.0);
       }
     }
   }
@@ -183,6 +195,21 @@ std::optional<Eigen::VectorXd> CartesianMotion::computeIK(
   const Eigen::Quaterniond& orientation,
   const Eigen::VectorXd& seed_state)
 {
+  // Check for near-singular seed configuration before IK
+  // Singularity thresholds for 6-DOF manipulator (PUMA-style)
+  constexpr double SINGULARITY_THRESHOLD = 0.05;  // ~3 degrees
+  
+  // Wrist singularity: j5 near 0 (axes 4 and 6 align)
+  // seed_state indices: [0]=lift, [1]=j1, [2]=j2, [3]=j3, [4]=j4, [5]=j5, [6]=j6
+  if (std::abs(seed_state(5)) < SINGULARITY_THRESHOLD) {
+    RCLCPP_DEBUG(get_logger(), "Near wrist singularity (j5 ≈ 0), IK may be ill-conditioned");
+  }
+  
+  // Elbow singularity: j3 near ±π/2 (arm fully extended or folded)
+  if (std::abs(std::abs(seed_state(3)) - M_PI_2) < SINGULARITY_THRESHOLD) {
+    RCLCPP_DEBUG(get_logger(), "Near elbow singularity (j3 ≈ ±π/2), IK may be ill-conditioned");
+  }
+  
   auto request = std::make_shared<GetPositionIK::Request>();
   
   // Set up IK request - matches Python exactly
@@ -229,6 +256,11 @@ std::optional<Eigen::VectorXd> CartesianMotion::computeIK(
       size_t idx = std::distance(joint_state.name.begin(), it);
       result(i) = joint_state.position[idx];
     }
+  }
+  
+  // Check result for near-singular configuration
+  if (std::abs(result(5)) < SINGULARITY_THRESHOLD) {
+    RCLCPP_DEBUG(get_logger(), "IK solution near wrist singularity");
   }
 
   return result;
@@ -363,10 +395,15 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
     Eigen::VectorXd joint_positions = *ik_result;
 
     // Compute joint velocities using numerical differentiation
+    // Clamp velocities to prevent spikes at segment boundaries
     Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
     if (t > 0 && !trajectory.points.empty()) {
+      // Per-joint velocity limits: lift_joint is prismatic (m/s), others are revolute (rad/s)
+      const std::vector<double> max_joint_vel = {0.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
       for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
-        joint_velocities(j) = (joint_positions(j) - prev_joints(j)) / dt_;
+        double raw_vel = (joint_positions(j) - prev_joints(j)) / dt_;
+        // Clamp to prevent velocity spikes at segment boundaries
+        joint_velocities(j) = std::clamp(raw_vel, -max_joint_vel[j], max_joint_vel[j]);
       }
     }
 
@@ -598,33 +635,62 @@ void CartesianMotion::startRecording()
 
 void CartesianMotion::stopRecording()
 {
-  recording_ = false;
-  RCLCPP_INFO(get_logger(), "Stopped recording. %zu samples", recorded_times_.size());
+  // Copy recorded data under lock, then release lock before FK calls
+  // This prevents deadlock: FK service calls need executor, which may need callbacks
+  std::vector<double> times_copy;
+  std::map<std::string, std::vector<double>> joint_pos_copy;
+  
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    recording_ = false;
+    RCLCPP_INFO(get_logger(), "Stopped recording. %zu samples", recorded_times_.size());
+    
+    // Copy data we need for FK computation
+    times_copy = recorded_times_;
+    joint_pos_copy = recorded_joint_positions_;
+  }
+  // Lock released here - safe to make service calls
 
   // Compute measured Cartesian positions using FK (post-processing, like Python)
   RCLCPP_INFO(get_logger(), "Computing measured Cartesian positions via FK...");
   
-  // Sample every Nth point to avoid too many FK calls (like Python)
-  size_t sample_step = std::max(size_t(1), recorded_times_.size() / 200);
+  // Sample up to 1000 points for better velocity resolution (matching Python)
+  // Higher sampling = more accurate velocity estimation via differentiation
+  const size_t TARGET_SAMPLES = 1000;
+  size_t sample_step = std::max(size_t(1), times_copy.size() / TARGET_SAMPLES);
   
-  for (size_t idx = 0; idx < recorded_times_.size(); idx += sample_step) {
+  for (size_t idx = 0; idx < times_copy.size(); idx += sample_step) {
     Eigen::VectorXd joint_pos(ALL_JOINT_NAMES.size());
     for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
-      joint_pos(j) = recorded_joint_positions_[ALL_JOINT_NAMES[j]][idx];
+      joint_pos(j) = joint_pos_copy[ALL_JOINT_NAMES[j]][idx];
     }
     
     auto pose = computeFK(joint_pos);
     if (pose) {
-      recorded_cartesian_time_.push_back(recorded_times_[idx]);
+      recorded_cartesian_time_.push_back(times_copy[idx]);
       recorded_cartesian_x_.push_back(pose->first.x());
       recorded_cartesian_y_.push_back(pose->first.y());
       recorded_cartesian_z_.push_back(pose->first.z());
     }
   }
 
-  // Compute measured Cartesian velocities from positions
+  // Compute measured Cartesian velocities from positions using central difference
+  // Central difference: v[i] = (x[i+1] - x[i-1]) / (2*dt) is more accurate than forward diff
   for (size_t i = 0; i < recorded_cartesian_time_.size(); ++i) {
-    if (i > 0) {
+    if (i > 0 && i < recorded_cartesian_time_.size() - 1) {
+      // Central difference for interior points (more accurate)
+      double dt = recorded_cartesian_time_[i+1] - recorded_cartesian_time_[i-1];
+      if (dt > 0.001) {
+        recorded_cartesian_vx_.push_back((recorded_cartesian_x_[i+1] - recorded_cartesian_x_[i-1]) / dt);
+        recorded_cartesian_vy_.push_back((recorded_cartesian_y_[i+1] - recorded_cartesian_y_[i-1]) / dt);
+        recorded_cartesian_vz_.push_back((recorded_cartesian_z_[i+1] - recorded_cartesian_z_[i-1]) / dt);
+      } else {
+        recorded_cartesian_vx_.push_back(0.0);
+        recorded_cartesian_vy_.push_back(0.0);
+        recorded_cartesian_vz_.push_back(0.0);
+      }
+    } else if (i > 0) {
+      // Forward difference for last point
       double dt = recorded_cartesian_time_[i] - recorded_cartesian_time_[i-1];
       if (dt > 0.001) {
         recorded_cartesian_vx_.push_back((recorded_cartesian_x_[i] - recorded_cartesian_x_[i-1]) / dt);
@@ -654,15 +720,18 @@ void CartesianMotion::saveToCSV(const std::string& filename)
     return;
   }
 
-  // Write header
+  // Write header - include BOTH commanded and measured data
   file << "time";
   for (const auto& name : ALL_JOINT_NAMES) {
     file << ",pos_" << name << ",vel_" << name;
   }
+  // Measured Cartesian (from FK on recorded joints)
   file << ",cart_x,cart_y,cart_z,cart_vx,cart_vy,cart_vz";
+  // Commanded Cartesian (ideal trapezoidal profile)
+  file << ",cmd_cart_x,cmd_cart_y,cmd_cart_z,cmd_cart_vx,cmd_cart_vy,cmd_cart_vz";
   file << "\n";
 
-  // Write measured data
+  // Write measured data with both measured and commanded Cartesian
   for (size_t i = 0; i < recorded_times_.size(); ++i) {
     file << std::fixed << std::setprecision(6) << recorded_times_[i];
     for (const auto& name : ALL_JOINT_NAMES) {
@@ -677,8 +746,79 @@ void CartesianMotion::saveToCSV(const std::string& filename)
         file << ",";
       }
     }
-    // Cartesian data (may be sparse)
-    file << ",,,,,";  // Placeholders for Cartesian data
+    
+    // MEASURED Cartesian data - find matching sample by time using binary search
+    if (!recorded_cartesian_time_.empty()) {
+      auto it = std::lower_bound(recorded_cartesian_time_.begin(), 
+                                  recorded_cartesian_time_.end(), 
+                                  recorded_times_[i]);
+      if (it != recorded_cartesian_time_.end()) {
+        size_t cart_idx = std::distance(recorded_cartesian_time_.begin(), it);
+        // Use closest sample (check if previous is closer)
+        if (cart_idx > 0) {
+          double diff_curr = std::abs(*it - recorded_times_[i]);
+          double diff_prev = std::abs(*(it - 1) - recorded_times_[i]);
+          if (diff_prev < diff_curr) {
+            cart_idx--;
+          }
+        }
+        if (cart_idx < recorded_cartesian_x_.size()) {
+          file << "," << recorded_cartesian_x_[cart_idx]
+               << "," << recorded_cartesian_y_[cart_idx]
+               << "," << recorded_cartesian_z_[cart_idx];
+          if (cart_idx < recorded_cartesian_vx_.size()) {
+            file << "," << recorded_cartesian_vx_[cart_idx]
+                 << "," << recorded_cartesian_vy_[cart_idx]
+                 << "," << recorded_cartesian_vz_[cart_idx];
+          } else {
+            file << ",,,";
+          }
+        } else {
+          file << ",,,,,";
+        }
+      } else {
+        file << ",,,,,";
+      }
+    } else {
+      file << ",,,,,";
+    }
+    
+    // COMMANDED Cartesian data - find matching sample by time
+    if (!commanded_times_.empty()) {
+      auto it = std::lower_bound(commanded_times_.begin(), 
+                                  commanded_times_.end(), 
+                                  recorded_times_[i]);
+      if (it != commanded_times_.end()) {
+        size_t cmd_idx = std::distance(commanded_times_.begin(), it);
+        // Use closest sample
+        if (cmd_idx > 0) {
+          double diff_curr = std::abs(*it - recorded_times_[i]);
+          double diff_prev = std::abs(*(it - 1) - recorded_times_[i]);
+          if (diff_prev < diff_curr) {
+            cmd_idx--;
+          }
+        }
+        if (cmd_idx < commanded_cartesian_x_.size()) {
+          file << "," << commanded_cartesian_x_[cmd_idx]
+               << "," << commanded_cartesian_y_[cmd_idx]
+               << "," << commanded_cartesian_z_[cmd_idx];
+          if (cmd_idx < commanded_cartesian_vx_.size()) {
+            file << "," << commanded_cartesian_vx_[cmd_idx]
+                 << "," << commanded_cartesian_vy_[cmd_idx]
+                 << "," << commanded_cartesian_vz_[cmd_idx];
+          } else {
+            file << ",,,";
+          }
+        } else {
+          file << ",,,,,";
+        }
+      } else {
+        file << ",,,,,";
+      }
+    } else {
+      file << ",,,,,";
+    }
+    
     file << "\n";
   }
 

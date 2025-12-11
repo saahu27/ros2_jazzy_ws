@@ -346,6 +346,9 @@ void JointSpaceMotion::startRecording()
 
 void JointSpaceMotion::stopRecording()
 {
+  // Acquire lock to safely stop recording and access recorded data
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  
   recording_ = false;
   RCLCPP_INFO(get_logger(), "Stopped recording. Recorded %zu samples", recorded_times_.size());
 }
@@ -432,9 +435,12 @@ bool JointSpaceMotion::executeWaypoints()
 
   RCLCPP_INFO(get_logger(), "Current joint positions received");
 
-  // Velocity and acceleration scaling (same as Python: V_SCALE=0.5, A_SCALE=0.5)
-  const double V_SCALE = 0.5;
-  const double A_SCALE = 0.5;
+  // Velocity and acceleration scaling
+  // Lower V_SCALE ensures we can reach cruise phase for shorter motions
+  // Min distance for trapezoidal = (v_max*V_SCALE)² / (a_max*A_SCALE)
+  // With V_SCALE=0.25, A_SCALE=0.8: min_dist = (2.0*0.25)² / (5.0*0.8) = 0.125 rad ≈ 7°
+  const double V_SCALE = 0.25;  // Lower velocity to ensure trapezoidal profiles
+  const double A_SCALE = 0.8;   // Higher acceleration for snappier motion
 
   // Helper lambda to create waypoint vector
   // Order: [lift_joint, j1, j2, j3, j4, j5, j6]

@@ -27,13 +27,28 @@ plt.style.use('seaborn-v0_8-whitegrid')
 COLORS = plt.cm.tab10.colors
 
 
-def smooth_signal(signal, window_size=31):
-    """Apply moving average smoothing to reduce noise."""
+# Standardized smoothing window size for all velocity signals
+# Matching Python implementations for consistent plots
+SMOOTHING_WINDOW_SIZE = 11
+
+
+def smooth_signal(signal, window_size=None):
+    """Apply moving average smoothing to reduce noise.
+    
+    Args:
+        signal: Input signal array
+        window_size: Window size for moving average. If None, uses SMOOTHING_WINDOW_SIZE.
+    
+    Returns:
+        Smoothed signal
+    """
+    if window_size is None:
+        window_size = SMOOTHING_WINDOW_SIZE
     if len(signal) < window_size:
         return signal
     
     pad_size = window_size // 2
-    padded = np.pad(signal, (pad_size, pad_size), mode='reflect')
+    padded = np.pad(signal, (pad_size, pad_size), mode='edge')
     kernel = np.ones(window_size) / window_size
     smoothed = np.convolve(padded, kernel, mode='valid')
     
@@ -187,67 +202,130 @@ def plot_cartesian_motion(csv_path: str, output_path: str = None):
     """
     Plot Cartesian motion results from C++ node.
     
-    Creates a multi-panel plot showing joint positions and velocities.
+    Creates a 3-panel plot matching the Python cartesian_motion.py format:
+    1. End-effector velocities: commanded (trapezoidal) vs measured
+    2. End-effector XY trajectory: measured (solid) vs commanded (dashed)
+    3. Joint velocities: all 7 joints
     """
     print(f"Loading data from: {csv_path}")
     df = pd.read_csv(csv_path)
     
-    joint_names = ['lift_joint', 'j1', 'j2', 'j3', 'j4', 'j5', 'j6']
+    fig, axes = plt.subplots(3, 1, figsize=(16, 14))
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Cartesian Motion with Trapezoidal Velocity Profiles (C++)', 
-                 fontsize=14, fontweight='bold')
+    time = df['time'].dropna().values
+    # Normalize time to start at 0
+    if len(time) > 0:
+        t0 = time[0]
+        time = time - t0
     
-    time = df['time'].values
+    # =========================================================
+    # Plot 1: END-EFFECTOR SPEED - COMMANDED (trapezoidal) vs MEASURED
+    # =========================================================
+    ax1 = axes[0]
     
-    # Panel 1: Lift joint
-    ax1 = axes[0, 0]
-    if 'pos_lift_joint' in df.columns:
-        ax1.plot(time, df['pos_lift_joint'], 'b-', linewidth=2, label='Position')
+    # COMMANDED Cartesian velocities (ideal trapezoidal profile) - NEW!
+    if 'cmd_cart_vx' in df.columns and 'cmd_cart_vy' in df.columns and 'cmd_cart_vz' in df.columns:
+        vx_cmd = df['cmd_cart_vx'].fillna(0).values
+        vy_cmd = df['cmd_cart_vy'].fillna(0).values
+        vz_cmd = df['cmd_cart_vz'].fillna(0).values
+        cmd_speed = np.sqrt(vx_cmd**2 + vy_cmd**2 + vz_cmd**2)
+        ax1.plot(time[:len(cmd_speed)], cmd_speed, 'b--', 
+                linewidth=2.5, label='COMMANDED |V| (trapezoidal)', alpha=0.9)
+    
+    # MEASURED Cartesian velocities (from FK)
+    if 'cart_vx' in df.columns and 'cart_vy' in df.columns and 'cart_vz' in df.columns:
+        vx = df['cart_vx'].fillna(0).values
+        vy = df['cart_vy'].fillna(0).values
+        vz = df['cart_vz'].fillna(0).values
+        # Compute speed magnitude
+        speed = np.sqrt(vx**2 + vy**2 + vz**2)
+        # Smooth the speed signal
+        speed_smooth = smooth_signal(speed)
+        ax1.plot(time[:len(speed_smooth)], speed_smooth, 'r-', 
+                linewidth=2, label='MEASURED |V| (smoothed)', alpha=0.8)
+    
     ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Position (m)')
-    ax1.set_title('Lift Joint Position')
-    ax1.legend()
+    ax1.set_ylabel('Speed (m/s)')
+    ax1.set_title('END-EFFECTOR SPEED: Commanded (trapezoidal) vs Measured', 
+                  fontsize=12, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=10)
     ax1.grid(True, alpha=0.3)
+    ax1.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
     
-    # Panel 2: Lift joint velocity
-    ax2 = axes[0, 1]
-    if 'vel_lift_joint' in df.columns:
-        vel = smooth_signal(df['vel_lift_joint'].values)
-        ax2.plot(time[:len(vel)], vel, 'r-', linewidth=2, label='Velocity')
-    ax2.set_xlabel('Time (s)')
-    ax2.set_ylabel('Velocity (m/s)')
-    ax2.set_title('Lift Joint Velocity')
-    ax2.legend()
+    # =========================================================
+    # Plot 2: END-EFFECTOR XY TRAJECTORY - MEASURED vs COMMANDED
+    # =========================================================
+    ax2 = axes[1]
+    
+    # MEASURED path (solid)
+    if 'cart_x' in df.columns and 'cart_y' in df.columns:
+        x = df['cart_x'].dropna().values
+        y = df['cart_y'].dropna().values
+        if len(x) > 0:
+            ax2.plot(x, y, 'r-', linewidth=2.5, label='MEASURED path', alpha=0.9)
+            ax2.scatter([x[0]], [y[0]], c='green', s=150, marker='o', 
+                       label='Start', zorder=5, edgecolors='black')
+            ax2.scatter([x[-1]], [y[-1]], c='red', s=150, marker='s', 
+                       label='End', zorder=5, edgecolors='black')
+    
+    # COMMANDED path (dashed)
+    if 'cmd_cart_x' in df.columns and 'cmd_cart_y' in df.columns:
+        x_cmd = df['cmd_cart_x'].dropna().values
+        y_cmd = df['cmd_cart_y'].dropna().values
+        if len(x_cmd) > 0:
+            ax2.plot(x_cmd, y_cmd, 'b--', linewidth=1.5, label='COMMANDED path', alpha=0.7)
+    
+    ax2.set_xlabel('X Position (m)')
+    ax2.set_ylabel('Y Position (m)')
+    ax2.set_title('END-EFFECTOR XY TRAJECTORY: Measured (solid) vs Commanded (dashed)', 
+                  fontsize=12, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=10)
     ax2.grid(True, alpha=0.3)
+    ax2.set_aspect('equal', adjustable='box')
     
-    # Panel 3: Arm joint positions
-    ax3 = axes[1, 0]
-    arm_joints = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6']
-    for i, jname in enumerate(arm_joints):
-        pos_col = f'pos_{jname}'
-        if pos_col in df.columns:
-            ax3.plot(time, df[pos_col], color=COLORS[i], 
-                    linewidth=1.5, label=jname, alpha=0.8)
-    ax3.set_xlabel('Time (s)')
-    ax3.set_ylabel('Position (rad)')
-    ax3.set_title('Arm Joint Positions')
-    ax3.legend(ncol=2)
-    ax3.grid(True, alpha=0.3)
+    # =========================================================
+    # Plot 3: ALL JOINT VELOCITIES
+    # =========================================================
+    ax3 = axes[2]
     
-    # Panel 4: Arm joint velocities
-    ax4 = axes[1, 1]
-    for i, jname in enumerate(arm_joints):
+    joint_colors = {
+        'lift_joint': 'purple', 
+        'j1': 'red', 
+        'j2': 'green', 
+        'j3': 'blue', 
+        'j4': 'orange', 
+        'j5': 'brown', 
+        'j6': 'magenta'
+    }
+    
+    all_joints = ['lift_joint', 'j1', 'j2', 'j3', 'j4', 'j5', 'j6']
+    max_vel = 0.5  # Default
+    
+    for jname in all_joints:
+        color = joint_colors[jname]
         vel_col = f'vel_{jname}'
         if vel_col in df.columns:
-            vel = smooth_signal(df[vel_col].values)
-            ax4.plot(time[:len(vel)], vel, color=COLORS[i], 
-                    linewidth=1.5, label=jname, alpha=0.8)
-    ax4.set_xlabel('Time (s)')
-    ax4.set_ylabel('Velocity (rad/s)')
-    ax4.set_title('Arm Joint Velocities (Smoothed)')
-    ax4.legend(ncol=2)
-    ax4.grid(True, alpha=0.3)
+            vel = df[vel_col].fillna(0).values
+            vel_smooth = smooth_signal(vel)
+            # Clip outliers
+            vel_clipped = np.clip(vel_smooth, -2.0, 2.0)
+            ax3.plot(time[:len(vel_clipped)], vel_clipped,
+                    color=color, linewidth=2, linestyle='-', 
+                    label=f'{jname}', alpha=0.8)
+            max_vel = max(max_vel, np.max(np.abs(vel_clipped)))
+    
+    ax3.set_xlabel('Time (s)')
+    ax3.set_ylabel('Velocity (rad/s or m/s)')
+    ax3.set_ylim(-max_vel * 1.2, max_vel * 1.2)
+    ax3.set_title('JOINT VELOCITIES (Smoothed) - All 7 Joints', 
+                  fontsize=12, fontweight='bold')
+    ax3.legend(loc='upper right', ncol=4, fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    ax3.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
+    
+    # Overall title
+    fig.suptitle('CARTESIAN MOTION (C++): End-Effector & Joint Velocity Analysis', 
+                 fontsize=14, fontweight='bold', y=1.01)
     
     plt.tight_layout()
     
@@ -263,59 +341,94 @@ def plot_compliance_control(csv_path: str, output_path: str = None):
     Plot compliance control results from C++ node.
     
     Creates a 3-panel plot:
-    1. Force over time (raw and filtered)
-    2. X position over time
+    1. Contact force over time (filtered, not raw)
+    2. X position over time  
     3. Force error analysis
     """
     print(f"Loading data from: {csv_path}")
     df = pd.read_csv(csv_path)
     
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
     fig.suptitle('Position-Based Admittance Control (C++)', 
                  fontsize=14, fontweight='bold')
     
     time = df['time'].values
     
-    # Panel 1: Force
+    # Panel 1: Contact Force (filtered, not raw - raw is too noisy)
     ax1 = axes[0]
-    if 'force_raw' in df.columns:
-        ax1.plot(time, df['force_raw'], 'b-', alpha=0.3, linewidth=1, label='Raw')
-    if 'force_filtered' in df.columns:
-        ax1.plot(time, df['force_filtered'], 'r-', linewidth=2, label='Filtered')
+    # Support both naming conventions
+    filtered_col = 'filtered_force' if 'filtered_force' in df.columns else 'force_filtered'
+    contact_col = 'contact_force' if 'contact_force' in df.columns else filtered_col
+    
+    if contact_col in df.columns:
+        contact_force = df[contact_col].values
+        ax1.plot(time, contact_force, 'b-', linewidth=2, label='Contact Force (filtered)')
+        # Set reasonable y-axis limits based on data
+        force_max = max(150, contact_force.max() * 1.1)
+        force_min = min(-10, contact_force.min() - 10)
+        ax1.set_ylim(force_min, force_max)
+    
     ax1.axhline(y=100, color='g', linestyle='--', linewidth=2, label='Target (100N)')
     ax1.axhspan(92, 108, alpha=0.2, color='green', label='Deadband (±8N)')
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Force (N)')
-    ax1.set_title('Contact Force')
-    ax1.legend()
+    ax1.set_title('Contact Force: Approach → Regulate at 100N Target')
+    ax1.legend(loc='lower right')
     ax1.grid(True, alpha=0.3)
     
-    # Panel 2: X Position
+    # Panel 2: X Position (zoom in on actual motion range)
     ax2 = axes[1]
-    if 'x_position' in df.columns:
-        ax2.plot(time, df['x_position'] * 1000, 'b-', linewidth=2, label='Actual')
-    if 'x_command' in df.columns:
-        ax2.plot(time, df['x_command'] * 1000, 'r--', linewidth=1.5, label='Command')
+    # Support both naming conventions
+    x_actual_col = 'x_actual' if 'x_actual' in df.columns else 'x_position'
+    x_cmd_col = 'x_cmd' if 'x_cmd' in df.columns else 'x_command'
+    
+    if x_actual_col in df.columns:
+        x_actual = df[x_actual_col].values * 1000  # Convert to mm
+        ax2.plot(time, x_actual, 'b-', linewidth=2, label='Actual')
+        
+        # Auto-scale to show meaningful range
+        x_range = x_actual.max() - x_actual.min()
+        if x_range < 1:  # Less than 1mm range
+            x_center = (x_actual.max() + x_actual.min()) / 2
+            ax2.set_ylim(x_center - 2, x_center + 2)  # Show ±2mm around center
+    
+    if x_cmd_col in df.columns:
+        ax2.plot(time, df[x_cmd_col] * 1000, 'r--', linewidth=1.5, label='Command')
+    
+    if 'x_eq' in df.columns:
+        x_eq = df['x_eq'].values
+        # Only plot x_eq where it's non-zero (after contact established)
+        mask = x_eq > 0.001
+        if mask.any():
+            ax2.plot(time[mask], x_eq[mask] * 1000, 'g:', linewidth=1.5, label='Equilibrium')
+    
     ax2.set_xlabel('Time (s)')
     ax2.set_ylabel('X Position (mm)')
-    ax2.set_title('End-Effector X Position')
-    ax2.legend()
+    ax2.set_title('End-Effector X Position (approaching wall at ~870mm)')
+    ax2.legend(loc='lower right')
     ax2.grid(True, alpha=0.3)
     
-    # Panel 3: Force Error
+    # Panel 3: Force Error with clearer visualization
     ax3 = axes[2]
-    if 'force_filtered' in df.columns:
-        force_error = 100.0 - df['force_filtered'].values
-        ax3.plot(time, force_error, 'b-', linewidth=2)
-        ax3.axhline(y=0, color='g', linestyle='-', linewidth=1)
-        ax3.axhspan(-8, 8, alpha=0.2, color='green', label='Inner deadband')
-        ax3.axhspan(-20, -8, alpha=0.1, color='yellow')
-        ax3.axhspan(8, 20, alpha=0.1, color='yellow', label='Outer deadband')
+    if 'force_error' in df.columns:
+        force_error = df['force_error'].values
+        ax3.plot(time, force_error, 'b-', linewidth=2, label='Force Error (F_target - F_measured)')
+    elif contact_col in df.columns:
+        force_error = 100.0 - df[contact_col].values
+        ax3.plot(time, force_error, 'b-', linewidth=2, label='Force Error')
+    
+    ax3.axhline(y=0, color='g', linestyle='-', linewidth=2, label='Zero Error (Perfect)')
+    ax3.axhspan(-8, 8, alpha=0.3, color='green', label='Inner deadband (±8N)')
+    ax3.axhspan(-20, -8, alpha=0.15, color='orange')
+    ax3.axhspan(8, 20, alpha=0.15, color='orange', label='Outer deadband')
     ax3.set_xlabel('Time (s)')
     ax3.set_ylabel('Force Error (N)')
-    ax3.set_title('Force Error (Target - Measured)')
-    ax3.legend()
+    ax3.set_title('Force Error: Drops to near-zero after contact (positive = push more, negative = retract)')
+    ax3.legend(loc='upper right')
     ax3.grid(True, alpha=0.3)
+    # Set reasonable y limits
+    if 'force_error' in df.columns or contact_col in df.columns:
+        ax3.set_ylim(-50, 120)
     
     plt.tight_layout()
     
@@ -348,11 +461,11 @@ def main():
         plot_joint_space_motion(csv_path)
     elif 'cartesian' in filename:
         plot_cartesian_motion(csv_path)
-    elif 'compliance' in filename:
+    elif 'compliance' in filename or 'admittance' in filename:
         plot_compliance_control(csv_path)
     else:
         print(f"Unknown file type: {filename}")
-        print("Filename should contain 'joint_space', 'cartesian', or 'compliance'")
+        print("Filename should contain 'joint_space', 'cartesian', 'compliance', or 'admittance'")
         sys.exit(1)
 
 

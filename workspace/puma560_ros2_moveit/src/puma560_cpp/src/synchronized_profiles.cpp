@@ -191,7 +191,11 @@ SynchronizedProfiles::evaluate(double t) const
       
       // pos is the displacement from start, add to start position
       positions(i) = start_(i) + pos;
-      velocities(i) = vel;
+      
+      // Clamp velocities to per-joint limits to prevent spikes
+      double v_max = getVMax(joint_names_[i]);
+      velocities(i) = std::clamp(vel, -v_max, v_max);
+      
       accelerations(i) = acc;
     }
   }

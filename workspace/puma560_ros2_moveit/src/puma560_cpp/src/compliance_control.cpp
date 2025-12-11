@@ -239,6 +239,16 @@ std::optional<Eigen::VectorXd> ComplianceControl::computeIK(
   const Eigen::Quaterniond& orientation,
   const Eigen::VectorXd& seed_state)
 {
+  // Check for near-singular seed configuration before IK
+  // Singularity thresholds for 6-DOF manipulator (PUMA-style)
+  constexpr double SINGULARITY_THRESHOLD = 0.05;  // ~3 degrees
+  
+  // Wrist singularity: j5 near 0 (axes 4 and 6 align)
+  // seed_state indices: [0]=lift, [1]=j1, [2]=j2, [3]=j3, [4]=j4, [5]=j5, [6]=j6
+  if (std::abs(seed_state(5)) < SINGULARITY_THRESHOLD) {
+    RCLCPP_DEBUG(get_logger(), "Near wrist singularity (j5 ≈ 0), IK may be ill-conditioned");
+  }
+  
   auto request = std::make_shared<GetPositionIK::Request>();
   
   request->ik_request.group_name = "arm";
@@ -620,6 +630,9 @@ void ComplianceControl::startRecording()
 
 void ComplianceControl::stopRecording()
 {
+  // Acquire lock to safely stop recording and access recorded data
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  
   recording_ = false;
   RCLCPP_INFO(get_logger(), "Stopped recording. %zu samples", recorded_times_.size());
 }
