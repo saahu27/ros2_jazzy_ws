@@ -86,7 +86,7 @@ private:
   double v_max_ = 0.08;       // 8 cm/s - Max Cartesian velocity (m/s)
   double a_max_ = 0.15;       // 15 cm/s² - Max Cartesian acceleration (m/s²)
   double lift_v_max_ = 0.1;   // 10 cm/s - Max lift velocity (m/s)
-  double dt_ = 0.02;          // 50 Hz - Trajectory sampling period (s)
+  double dt_ = 0.005;         // 200 Hz - Trajectory sampling period (s)
 
   // Callback groups for thread safety
   rclcpp::CallbackGroup::SharedPtr action_callback_group_;
@@ -136,6 +136,17 @@ private:
   std::vector<double> commanded_cartesian_vx_;
   std::vector<double> commanded_cartesian_vy_;
   std::vector<double> commanded_cartesian_vz_;
+
+  // Pending commanded data (timestamped at execution start)
+  std::vector<double> pending_time_from_start_;
+  std::map<std::string, std::vector<double>> pending_joint_positions_;
+  std::map<std::string, std::vector<double>> pending_joint_velocities_;
+  std::vector<double> pending_cartesian_x_;
+  std::vector<double> pending_cartesian_y_;
+  std::vector<double> pending_cartesian_z_;
+  std::vector<double> pending_cartesian_vx_;
+  std::vector<double> pending_cartesian_vy_;
+  std::vector<double> pending_cartesian_vz_;
 
   /**
    * @brief Callback for joint state messages

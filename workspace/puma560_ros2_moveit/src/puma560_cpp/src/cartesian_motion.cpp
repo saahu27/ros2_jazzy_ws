@@ -47,7 +47,7 @@ CartesianMotion::CartesianMotion(const rclcpp::NodeOptions& options)
   v_max_ = declare_parameter("v_max", 0.08);       // 8 cm/s
   a_max_ = declare_parameter("a_max", 0.15);       // 15 cm/s²
   lift_v_max_ = declare_parameter("lift_v_max", 0.1);  // 10 cm/s
-  dt_ = declare_parameter("dt", 0.02);             // 50 Hz
+  dt_ = declare_parameter("dt", 0.005);            // 200 Hz
 
   // Create MutuallyExclusive callback group for action client
   // This ensures action callbacks don't run concurrently
@@ -362,6 +362,7 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
   // Sample trajectory points
   double t = 0.0;
   Eigen::VectorXd prev_joints = seed_joints;
+  Eigen::VectorXd prev_vels = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
   int ik_failures = 0;
   const int max_ik_failures = 5;
 
@@ -394,19 +395,23 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
 
     Eigen::VectorXd joint_positions = *ik_result;
 
-    // Compute joint velocities using numerical differentiation
-    // Clamp velocities to prevent spikes at segment boundaries
+    // Compute joint velocities/accelerations using finite differences at high rate
     Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
-    if (t > 0 && !trajectory.points.empty()) {
-      // Per-joint velocity limits: lift_joint is prismatic (m/s), others are revolute (rad/s)
-      const std::vector<double> max_joint_vel = {0.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
+    Eigen::VectorXd joint_accelerations = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
+    // Per-joint limits: lift_joint is prismatic (m/s, m/s²), others are revolute (rad/s, rad/s²)
+    const std::vector<double> max_joint_vel = {0.5, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0};
+    const std::vector<double> max_joint_acc = {1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0};
+
+    if (t > 0) {
       for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
         double raw_vel = (joint_positions(j) - prev_joints(j)) / dt_;
-        // Clamp to prevent velocity spikes at segment boundaries
+        double raw_acc = (raw_vel - prev_vels(j)) / dt_;
         joint_velocities(j) = std::clamp(raw_vel, -max_joint_vel[j], max_joint_vel[j]);
+        joint_accelerations(j) = std::clamp(raw_acc, -max_joint_acc[j], max_joint_acc[j]);
       }
     }
 
+    prev_vels = joint_velocities;
     prev_joints = joint_positions;
 
     // Store for recording
@@ -422,7 +427,7 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
     for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
       point.positions[j] = joint_positions(j);
       point.velocities[j] = joint_velocities(j);
-      point.accelerations[j] = 0.0;  // Let controller handle accelerations
+      point.accelerations[j] = joint_accelerations(j);
     }
 
     point.time_from_start.sec = static_cast<int32_t>(t);
@@ -451,26 +456,39 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
 
   RCLCPP_INFO(get_logger(), "Generated trajectory with %zu points", trajectory.points.size());
 
-  // Store commanded data if recording
+  // Store commanded data to pending buffers (time-stamped at execution start)
   if (recording_) {
-    double time_offset = now() - record_start_time_;
+    pending_time_from_start_.clear();
+    pending_cartesian_x_.clear();
+    pending_cartesian_y_.clear();
+    pending_cartesian_z_.clear();
+    pending_cartesian_vx_.clear();
+    pending_cartesian_vy_.clear();
+    pending_cartesian_vz_.clear();
+    pending_joint_positions_.clear();
+    pending_joint_velocities_.clear();
+    for (const auto& name : ALL_JOINT_NAMES) {
+      pending_joint_positions_[name] = {};
+      pending_joint_velocities_[name] = {};
+    }
+
     for (size_t i = 0; i < trajectory.points.size(); ++i) {
       const auto& point = trajectory.points[i];
       double t_point = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9;
-      commanded_times_.push_back(time_offset + t_point);
+      pending_time_from_start_.push_back(t_point);
 
       for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
-        commanded_joint_positions_[ALL_JOINT_NAMES[j]].push_back(point.positions[j]);
-        commanded_joint_velocities_[ALL_JOINT_NAMES[j]].push_back(point.velocities[j]);
+        pending_joint_positions_[ALL_JOINT_NAMES[j]].push_back(point.positions[j]);
+        pending_joint_velocities_[ALL_JOINT_NAMES[j]].push_back(point.velocities[j]);
       }
 
       if (i < trajectory_poses.size()) {
-        commanded_cartesian_x_.push_back(trajectory_poses[i].x());
-        commanded_cartesian_y_.push_back(trajectory_poses[i].y());
-        commanded_cartesian_z_.push_back(trajectory_poses[i].z());
-        commanded_cartesian_vx_.push_back(trajectory_velocities[i].x());
-        commanded_cartesian_vy_.push_back(trajectory_velocities[i].y());
-        commanded_cartesian_vz_.push_back(trajectory_velocities[i].z());
+        pending_cartesian_x_.push_back(trajectory_poses[i].x());
+        pending_cartesian_y_.push_back(trajectory_poses[i].y());
+        pending_cartesian_z_.push_back(trajectory_poses[i].z());
+        pending_cartesian_vx_.push_back(trajectory_velocities[i].x());
+        pending_cartesian_vy_.push_back(trajectory_velocities[i].y());
+        pending_cartesian_vz_.push_back(trajectory_velocities[i].z());
       }
     }
   }
@@ -560,6 +578,38 @@ bool CartesianMotion::executeTrajectory(const trajectory_msgs::msg::JointTraject
     return false;
   }
 
+  // If recording, stamp pending commanded data at execution start
+  if (recording_ && !pending_time_from_start_.empty()) {
+    double exec_start = now() - record_start_time_;
+    for (size_t i = 0; i < pending_time_from_start_.size(); ++i) {
+      commanded_times_.push_back(exec_start + pending_time_from_start_[i]);
+      for (const auto& name : ALL_JOINT_NAMES) {
+        commanded_joint_positions_[name].push_back(pending_joint_positions_[name][i]);
+        commanded_joint_velocities_[name].push_back(pending_joint_velocities_[name][i]);
+      }
+      if (i < pending_cartesian_x_.size()) {
+        commanded_cartesian_x_.push_back(pending_cartesian_x_[i]);
+        commanded_cartesian_y_.push_back(pending_cartesian_y_[i]);
+        commanded_cartesian_z_.push_back(pending_cartesian_z_[i]);
+      }
+      if (i < pending_cartesian_vx_.size()) {
+        commanded_cartesian_vx_.push_back(pending_cartesian_vx_[i]);
+        commanded_cartesian_vy_.push_back(pending_cartesian_vy_[i]);
+        commanded_cartesian_vz_.push_back(pending_cartesian_vz_[i]);
+      }
+    }
+    // Clear pending buffers after stamping
+    pending_time_from_start_.clear();
+    pending_joint_positions_.clear();
+    pending_joint_velocities_.clear();
+    pending_cartesian_x_.clear();
+    pending_cartesian_y_.clear();
+    pending_cartesian_z_.clear();
+    pending_cartesian_vx_.clear();
+    pending_cartesian_vy_.clear();
+    pending_cartesian_vz_.clear();
+  }
+
   RCLCPP_INFO(get_logger(), "Goal accepted");
 
   // Wait for result using future
@@ -621,11 +671,24 @@ void CartesianMotion::startRecording()
   commanded_cartesian_vy_.clear();
   commanded_cartesian_vz_.clear();
 
+  // Clear pending commanded data
+  pending_time_from_start_.clear();
+  pending_joint_positions_.clear();
+  pending_joint_velocities_.clear();
+  pending_cartesian_x_.clear();
+  pending_cartesian_y_.clear();
+  pending_cartesian_z_.clear();
+  pending_cartesian_vx_.clear();
+  pending_cartesian_vy_.clear();
+  pending_cartesian_vz_.clear();
+
   for (const auto& name : ALL_JOINT_NAMES) {
     recorded_joint_positions_[name] = {};
     recorded_joint_velocities_[name] = {};
     commanded_joint_positions_[name] = {};
     commanded_joint_velocities_[name] = {};
+    pending_joint_positions_[name] = {};
+    pending_joint_velocities_[name] = {};
   }
 
   record_start_time_ = now();

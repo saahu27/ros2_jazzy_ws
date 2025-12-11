@@ -96,7 +96,7 @@ private:
   double f_desired_ = 100.0;        // Target contact force (N)
   double kf_compliance_ = 0.00003;  // Compliance gain (m/N) = 0.03mm per Newton error
   double control_hz_ = 50.0;        // Control rate (Hz)
-  double filter_alpha_ = 0.005;     // VERY heavy filtering (tau ≈ 4s at 50Hz)
+  double filter_alpha_ = 0.015;     // Smoother filtering (tau ≈ 1.3s at 50Hz)
   
   // Two-zone deadband parameters (matching Python)
   double deadband_inner_ = 8.0;     // +/-8N: True steady state (92-108N)
@@ -104,8 +104,8 @@ private:
   double deadband_high_ = 25.0;     // Only retract if F > 125N
   
   // Two-level correction rates (gain scheduling)
-  double correction_fast_ = 0.0001;   // Fast: 0.1mm/s for large errors (F < 80N)
-  double correction_slow_ = 0.00005;  // Slow: 0.05mm/s for small errors (80-92N)
+  double correction_fast_ = 0.0002;   // Fast: 0.2mm/s for large errors (F < 80N)
+  double correction_slow_ = 0.00008;  // Slow: 0.08mm/s for small errors (80-92N)
   
   // Approach parameters
   double approach_vel_ = 0.002;     // Approach velocity (m/s) = 2mm/s
