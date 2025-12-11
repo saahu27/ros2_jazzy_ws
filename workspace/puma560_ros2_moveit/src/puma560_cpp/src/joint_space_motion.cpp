@@ -38,12 +38,13 @@ JointSpaceMotion::JointSpaceMotion(const rclcpp::NodeOptions& options)
 
   // Create Reentrant callback group for joint state subscriber
   // This allows joint state updates while action is running
-  auto sub_callback_group = create_callback_group(
+  // IMPORTANT: Store as member variable to prevent going out of scope
+  sub_callback_group_ = create_callback_group(
     rclcpp::CallbackGroupType::Reentrant);
 
   // Create joint state subscriber with its own callback group
   rclcpp::SubscriptionOptions sub_options;
-  sub_options.callback_group = sub_callback_group;
+  sub_options.callback_group = sub_callback_group_;
   joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", 10,
     std::bind(&JointSpaceMotion::jointStateCallback, this, _1),
@@ -170,6 +171,8 @@ trajectory_msgs::msg::JointTrajectory JointSpaceMotion::generateTrajectory(
 
   // Generate trajectory points
   trajectory_msgs::msg::JointTrajectory trajectory;
+  trajectory.header.stamp = this->get_clock()->now();
+  trajectory.header.frame_id = "";  // Empty for joint-space trajectory
   trajectory.joint_names = JOINT_NAMES;
 
   int n_points = static_cast<int>(std::ceil(total_time / dt)) + 1;
@@ -192,6 +195,19 @@ trajectory_msgs::msg::JointTrajectory JointSpaceMotion::generateTrajectory(
     point.time_from_start.nanosec = static_cast<uint32_t>((t - point.time_from_start.sec) * 1e9);
 
     trajectory.points.push_back(point);
+  }
+
+  // Ensure final point is exactly at goal with zero velocity (JTC requirement)
+  if (!trajectory.points.empty()) {
+    auto& last_point = trajectory.points.back();
+    auto [final_pos, _, __] = profiles.evaluate(total_time);
+    for (size_t j = 0; j < JOINT_NAMES.size(); ++j) {
+      last_point.positions[j] = end_joints(j);  // Exact goal position
+      last_point.velocities[j] = 0.0;           // Zero velocity at end
+      last_point.accelerations[j] = 0.0;        // Zero acceleration at end
+    }
+    last_point.time_from_start.sec = static_cast<int32_t>(total_time);
+    last_point.time_from_start.nanosec = static_cast<uint32_t>((total_time - last_point.time_from_start.sec) * 1e9);
   }
 
   // Store commanded values with time offset from recording start
@@ -336,6 +352,9 @@ void JointSpaceMotion::stopRecording()
 
 void JointSpaceMotion::saveToCSV(const std::string& filename)
 {
+  // Acquire lock to safely copy recorded data
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  
   std::string filepath = RESULTS_DIR + "/" + filename;
   std::ofstream file(filepath);
   if (!file.is_open()) {
@@ -429,7 +448,12 @@ bool JointSpaceMotion::executeWaypoints()
   // Start recording
   startRecording();
 
-  Eigen::VectorXd current = current_positions_;
+  // Get current position with mutex protection
+  Eigen::VectorXd current;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    current = current_positions_;
+  }
 
   // =========================================================
   // PHASE 1: Move to home position (Z=0)
@@ -443,7 +467,11 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = target;
+    // Use actual measured position for next trajectory (more accurate than commanded)
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -465,7 +493,10 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = waypoints_z0[i];
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -483,7 +514,10 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = target;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -505,7 +539,10 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = waypoints_z05[i];
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -522,7 +559,10 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = target;
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -544,7 +584,10 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = waypoints_z1[i];
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      current = current_positions_;
+    }
     std::this_thread::sleep_for(500ms);
   }
 
@@ -560,7 +603,6 @@ bool JointSpaceMotion::executeWaypoints()
       stopRecording();
       return false;
     }
-    current = target;
   }
 
   // Stop recording and save

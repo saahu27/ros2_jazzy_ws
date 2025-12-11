@@ -91,6 +91,8 @@ def generate_launch_description():
     # =========================================================
     # GAZEBO SIMULATION
     # =========================================================
+    # NOTE: robot_state_publisher is DELAYED to allow Gazebo clock to initialize first.
+    # This prevents TF2 time jump warnings caused by sim time not being available yet.
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -98,6 +100,12 @@ def generate_launch_description():
             "robot_description": robot_description,
             "use_sim_time": True
         }]
+    )
+    
+    # Delay robot_state_publisher by 2s to allow Gazebo clock bridge to initialize
+    delayed_robot_state_publisher = TimerAction(
+        period=2.0,
+        actions=[robot_state_publisher_node]
     )
     
     gazebo = IncludeLaunchDescription(
@@ -109,11 +117,17 @@ def generate_launch_description():
         ]
     )
     
+    # Spawn entity after robot_state_publisher is ready (needs robot_description topic)
     gz_spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
         output="screen",
         arguments=["-topic", "robot_description", "-name", "puma560_robot"],
+    )
+    
+    delayed_gz_spawn_entity = TimerAction(
+        period=3.0,
+        actions=[gz_spawn_entity]
     )
     
     gz_ros2_bridge = Node(
@@ -145,14 +159,14 @@ def generate_launch_description():
         ],
     )
     
-    # Delay controllers to let Gazebo start
+    # Adjusted delays to account for robot_state_publisher delay
     delayed_joint_state_broadcaster = TimerAction(
-        period=3.0,
+        period=4.0,
         actions=[joint_state_broadcaster_spawner]
     )
     
     delayed_arm_controller = TimerAction(
-        period=4.0,
+        period=5.0,
         actions=[arm_controller_spawner]
     )
     
@@ -179,9 +193,9 @@ def generate_launch_description():
         arguments=["--ros-args", "--log-level", "warn"],
     )
     
-    # Delay MoveIt to let controllers start
+    # Delay MoveIt to let controllers start (adjusted for RSP delay)
     delayed_move_group = TimerAction(
-        period=6.0,
+        period=7.0,
         actions=[move_group_node]
     )
     
@@ -248,6 +262,14 @@ def generate_launch_description():
     # =========================================================
     # LAUNCH DESCRIPTION
     # =========================================================
+    # Launch sequence with proper timing to avoid TF2 time jump warnings:
+    # 0s: Gazebo, gz_ros2_bridge (clock bridge)
+    # 2s: robot_state_publisher (after clock is available)
+    # 3s: gz_spawn_entity (needs robot_description from RSP)
+    # 4s: joint_state_broadcaster
+    # 5s: arm_controller
+    # 7s: move_group
+    # 12s: cartesian_motion application
     return LaunchDescription([
         # Arguments
         model_arg,
@@ -257,11 +279,11 @@ def generate_launch_description():
         # Environment
         gazebo_resource_path,
         
-        # Gazebo simulation
-        robot_state_publisher_node,
+        # Gazebo simulation (clock bridge starts immediately)
         gazebo,
-        gz_spawn_entity,
         gz_ros2_bridge,
+        delayed_robot_state_publisher,
+        delayed_gz_spawn_entity,
         
         # Controllers
         delayed_joint_state_broadcaster,

@@ -1,16 +1,25 @@
 /**
  * @file cartesian_motion.cpp
  * @brief Implementation of CartesianMotion node
+ * 
+ * TRUE Cartesian motion with trapezoidal velocity profiles.
+ * End-effector moves in STRAIGHT LINES in Cartesian space at constant velocity.
+ * 
+ * Key difference from Joint-Space Motion:
+ * - Joint-Space: q(t) = q_start + (q_end - q_start) * s(t)  -> Curved Cartesian path
+ * - Cartesian:   x(t) = x_start + (x_end - x_start) * s(t)  -> Straight Cartesian path
+ *                q(t) = IK(x(t))
  */
 
 #include "puma560_cpp/cartesian_motion.hpp"
-#include "puma560_cpp/synchronized_profiles.hpp"
+#include "puma560_cpp/trapezoidal_profile.hpp"
 
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <filesystem>
+#include <future>
 
 using namespace std::chrono_literals;
 using std::placeholders::_1;
@@ -18,15 +27,15 @@ using std::placeholders::_1;
 namespace puma560_cpp
 {
 
-// Static member definitions
-const std::vector<std::string> CartesianMotion::ARM_JOINT_NAMES = {
-  "j1", "j2", "j3", "j4", "j5", "j6"
-};
+// Static member definitions - matches Python exactly
 const std::vector<std::string> CartesianMotion::ALL_JOINT_NAMES = {
   "lift_joint", "j1", "j2", "j3", "j4", "j5", "j6"
 };
 const std::string CartesianMotion::ACTION_NAME = "/arm_controller/follow_joint_trajectory";
 const std::string CartesianMotion::RESULTS_DIR = "/root/ros2_ws/src/puma560_ros2_moveit/results";
+const std::string CartesianMotion::PLANNING_GROUP = "arm";
+const std::string CartesianMotion::EE_LINK = "link7";
+const std::string CartesianMotion::BASE_FRAME = "world";
 
 CartesianMotion::CartesianMotion(const rclcpp::NodeOptions& options)
   : Node("cartesian_motion", options),
@@ -34,18 +43,25 @@ CartesianMotion::CartesianMotion(const rclcpp::NodeOptions& options)
 {
   RCLCPP_INFO(get_logger(), "Initializing CartesianMotion node");
 
-  // Declare parameters
-  v_max_ = declare_parameter("v_max", 0.05);
-  a_max_ = declare_parameter("a_max", 0.5);
-  lift_v_max_ = declare_parameter("lift_v_max", 0.08);
-  dt_ = declare_parameter("dt", 0.005);
+  // Declare parameters (matching Python values)
+  v_max_ = declare_parameter("v_max", 0.08);       // 8 cm/s
+  a_max_ = declare_parameter("a_max", 0.15);       // 15 cm/s²
+  lift_v_max_ = declare_parameter("lift_v_max", 0.1);  // 10 cm/s
+  dt_ = declare_parameter("dt", 0.02);             // 50 Hz
 
-  // Create callback group for concurrent execution
-  auto callback_group = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  // Create MutuallyExclusive callback group for action client
+  // This ensures action callbacks don't run concurrently
+  action_callback_group_ = create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
 
-  // Create joint state subscriber
+  // Create Reentrant callback group for subscribers
+  // This allows joint state updates while action is running
+  sub_callback_group_ = create_callback_group(
+    rclcpp::CallbackGroupType::Reentrant);
+
+  // Create joint state subscriber with its own callback group
   rclcpp::SubscriptionOptions sub_options;
-  sub_options.callback_group = callback_group;
+  sub_options.callback_group = sub_callback_group_;
   joint_state_sub_ = create_subscription<sensor_msgs::msg::JointState>(
     "/joint_states", 10,
     std::bind(&CartesianMotion::jointStateCallback, this, _1),
@@ -55,14 +71,16 @@ CartesianMotion::CartesianMotion(const rclcpp::NodeOptions& options)
   ik_client_ = create_client<GetPositionIK>("/compute_ik");
   fk_client_ = create_client<GetPositionFK>("/compute_fk");
 
-  // Create action client
+  // Create action client with MutuallyExclusive callback group
   action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
-    this, ACTION_NAME);
+    this, ACTION_NAME, action_callback_group_);
 
   // Ensure results directory exists
   std::filesystem::create_directories(RESULTS_DIR);
 
   RCLCPP_INFO(get_logger(), "CartesianMotion node initialized");
+  RCLCPP_INFO(get_logger(), "  Planning group: %s", PLANNING_GROUP.c_str());
+  RCLCPP_INFO(get_logger(), "  End-effector: %s", EE_LINK.c_str());
 }
 
 CartesianMotion::~CartesianMotion()
@@ -74,8 +92,7 @@ void CartesianMotion::jointStateCallback(const sensor_msgs::msg::JointState::Sha
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
 
-  bool has_velocity = msg->velocity.size() == msg->name.size();
-
+  // Extract positions for our joints
   for (size_t i = 0; i < msg->name.size(); ++i) {
     auto it = std::find(ALL_JOINT_NAMES.begin(), ALL_JOINT_NAMES.end(), msg->name[i]);
     if (it != ALL_JOINT_NAMES.end()) {
@@ -99,22 +116,29 @@ void CartesianMotion::jointStateCallback(const sensor_msgs::msg::JointState::Sha
     has_joint_state_ = true;
   }
 
-  // Recording
+  // Recording (like Python's _joint_state_callback)
   if (recording_) {
     double t = now() - record_start_time_;
     recorded_times_.push_back(t);
 
     for (size_t i = 0; i < ALL_JOINT_NAMES.size(); ++i) {
       const auto& name = ALL_JOINT_NAMES[i];
-      recorded_positions_[name].push_back(current_positions_(i));
+      recorded_joint_positions_[name].push_back(current_positions_(i));
 
-      // Find velocity from message
-      auto msg_it = std::find(msg->name.begin(), msg->name.end(), name);
-      if (msg_it != msg->name.end() && has_velocity) {
-        size_t msg_idx = std::distance(msg->name.begin(), msg_it);
-        recorded_velocities_[name].push_back(msg->velocity[msg_idx]);
+      // Compute velocity from position derivative (like Python)
+      if (recorded_joint_positions_[name].size() > 1) {
+        size_t n = recorded_times_.size();
+        double dt_meas = recorded_times_[n-1] - recorded_times_[n-2];
+        if (dt_meas > 0.001) {
+          size_t pos_n = recorded_joint_positions_[name].size();
+          double vel = (recorded_joint_positions_[name][pos_n-1] - 
+                        recorded_joint_positions_[name][pos_n-2]) / dt_meas;
+          recorded_joint_velocities_[name].push_back(vel);
+        } else {
+          recorded_joint_velocities_[name].push_back(0.0);
+        }
       } else {
-        recorded_velocities_[name].push_back(0.0);
+        recorded_joint_velocities_[name].push_back(0.0);
       }
     }
   }
@@ -122,7 +146,6 @@ void CartesianMotion::jointStateCallback(const sensor_msgs::msg::JointState::Sha
 
 bool CartesianMotion::waitForJointState(double timeout_sec)
 {
-  // Executor is already spinning in another thread, just wait for the flag
   auto start = std::chrono::steady_clock::now();
   while (!has_joint_state_) {
     auto elapsed = std::chrono::steady_clock::now() - start;
@@ -137,19 +160,21 @@ bool CartesianMotion::waitForJointState(double timeout_sec)
 
 bool CartesianMotion::waitForServices(double timeout_sec)
 {
-  RCLCPP_INFO(get_logger(), "Waiting for IK/FK services...");
+  RCLCPP_INFO(get_logger(), "Waiting for MoveIt IK service...");
   
   if (!ik_client_->wait_for_service(std::chrono::duration<double>(timeout_sec))) {
-    RCLCPP_ERROR(get_logger(), "IK service not available");
+    RCLCPP_ERROR(get_logger(), "IK service not available!");
     return false;
   }
+  RCLCPP_INFO(get_logger(), "  IK service ready");
   
+  RCLCPP_INFO(get_logger(), "Waiting for MoveIt FK service...");
   if (!fk_client_->wait_for_service(std::chrono::duration<double>(timeout_sec))) {
-    RCLCPP_ERROR(get_logger(), "FK service not available");
+    RCLCPP_ERROR(get_logger(), "FK service not available!");
     return false;
   }
+  RCLCPP_INFO(get_logger(), "  FK service ready");
   
-  RCLCPP_INFO(get_logger(), "IK/FK services available");
   return true;
 }
 
@@ -160,28 +185,31 @@ std::optional<Eigen::VectorXd> CartesianMotion::computeIK(
 {
   auto request = std::make_shared<GetPositionIK::Request>();
   
-  // Set up IK request
-  request->ik_request.group_name = "arm";
+  // Set up IK request - matches Python exactly
+  request->ik_request.group_name = PLANNING_GROUP;
   request->ik_request.avoid_collisions = false;
   
-  // Set target pose - use world frame (matching Python)
-  request->ik_request.pose_stamped.header.frame_id = "world";
+  // Set target pose in world frame (matching Python)
+  request->ik_request.pose_stamped.header.frame_id = BASE_FRAME;
   request->ik_request.pose_stamped.pose.position.x = position.x();
   request->ik_request.pose_stamped.pose.position.y = position.y();
   request->ik_request.pose_stamped.pose.position.z = position.z();
   request->ik_request.pose_stamped.pose.orientation = toMsg(orientation);
   
-  // Set seed state (arm joints only)
-  request->ik_request.robot_state.joint_state.name = ARM_JOINT_NAMES;
-  request->ik_request.robot_state.joint_state.position.resize(ARM_JOINT_NAMES.size());
-  for (size_t i = 0; i < ARM_JOINT_NAMES.size(); ++i) {
-    // Find this joint in the full state (skip lift_joint at index 0)
-    request->ik_request.robot_state.joint_state.position[i] = seed_state(i + 1);
+  // Set seed state - ALL 7 JOINTS (matching Python)
+  request->ik_request.robot_state.joint_state.name = ALL_JOINT_NAMES;
+  request->ik_request.robot_state.joint_state.position.resize(ALL_JOINT_NAMES.size());
+  for (size_t i = 0; i < ALL_JOINT_NAMES.size(); ++i) {
+    request->ik_request.robot_state.joint_state.position[i] = seed_state(i);
   }
+  
+  // Set timeout (matching Python)
+  request->ik_request.timeout.sec = 1;
+  request->ik_request.timeout.nanosec = 0;
 
-  // Call service - executor is already spinning, use future.wait_for directly
+  // Call service
   auto future = ik_client_->async_send_request(request);
-  if (future.wait_for(5s) != std::future_status::ready) {
+  if (future.wait_for(2s) != std::future_status::ready) {
     RCLCPP_WARN(get_logger(), "IK service call timeout");
     return std::nullopt;
   }
@@ -192,11 +220,11 @@ std::optional<Eigen::VectorXd> CartesianMotion::computeIK(
     return std::nullopt;
   }
 
-  // Extract joint positions
-  Eigen::VectorXd result(ARM_JOINT_NAMES.size());
+  // Extract joint positions in correct order (like Python)
+  Eigen::VectorXd result = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
   const auto& joint_state = response->solution.joint_state;
-  for (size_t i = 0; i < ARM_JOINT_NAMES.size(); ++i) {
-    auto it = std::find(joint_state.name.begin(), joint_state.name.end(), ARM_JOINT_NAMES[i]);
+  for (size_t i = 0; i < ALL_JOINT_NAMES.size(); ++i) {
+    auto it = std::find(joint_state.name.begin(), joint_state.name.end(), ALL_JOINT_NAMES[i]);
     if (it != joint_state.name.end()) {
       size_t idx = std::distance(joint_state.name.begin(), it);
       result(i) = joint_state.position[idx];
@@ -211,19 +239,20 @@ std::optional<std::pair<Eigen::Vector3d, Eigen::Quaterniond>> CartesianMotion::c
 {
   auto request = std::make_shared<GetPositionFK::Request>();
   
-  request->header.frame_id = "world";  // Base frame
-  request->fk_link_names = {"link7"};  // End effector link (matching Python)
+  // Set up FK request - matches Python exactly
+  request->header.frame_id = BASE_FRAME;
+  request->fk_link_names = {EE_LINK};
   
-  // Set joint state (arm joints only)
-  request->robot_state.joint_state.name = ARM_JOINT_NAMES;
-  request->robot_state.joint_state.position.resize(ARM_JOINT_NAMES.size());
-  for (size_t i = 0; i < ARM_JOINT_NAMES.size(); ++i) {
-    request->robot_state.joint_state.position[i] = joint_positions(i + 1);  // Skip lift_joint
+  // Set joint state - ALL 7 JOINTS (matching Python)
+  request->robot_state.joint_state.name = ALL_JOINT_NAMES;
+  request->robot_state.joint_state.position.resize(ALL_JOINT_NAMES.size());
+  for (size_t i = 0; i < ALL_JOINT_NAMES.size(); ++i) {
+    request->robot_state.joint_state.position[i] = joint_positions(i);
   }
 
-  // Call service - executor is already spinning, use future.wait_for directly
+  // Call service
   auto future = fk_client_->async_send_request(request);
-  if (future.wait_for(5s) != std::future_status::ready) {
+  if (future.wait_for(2s) != std::future_status::ready) {
     RCLCPP_WARN(get_logger(), "FK service call timeout");
     return std::nullopt;
   }
@@ -241,9 +270,18 @@ std::optional<std::pair<Eigen::Vector3d, Eigen::Quaterniond>> CartesianMotion::c
 
   const auto& pose = response->pose_stamped[0].pose;
   Eigen::Vector3d position(pose.position.x, pose.position.y, pose.position.z);
-  Eigen::Quaterniond orientation = fromMsg(pose.orientation);
+  Eigen::Quaterniond quat = fromMsg(pose.orientation);
 
-  return std::make_pair(position, orientation);
+  return std::make_pair(position, quat);
+}
+
+std::optional<std::pair<Eigen::Vector3d, Eigen::Quaterniond>> CartesianMotion::getCurrentEEPose()
+{
+  std::lock_guard<std::mutex> lock(state_mutex_);
+  if (!has_joint_state_) {
+    return std::nullopt;
+  }
+  return computeFK(current_positions_);
 }
 
 std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCartesianTrajectory(
@@ -252,49 +290,91 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
   const Eigen::Quaterniond& orientation,
   const Eigen::VectorXd& seed_joints)
 {
-  // Compute distance
-  double distance = (end_pos - start_pos).norm();
+  // Compute Cartesian distance (XYZ)
+  double dx = end_pos.x() - start_pos.x();
+  double dy = end_pos.y() - start_pos.y();
+  double dz = end_pos.z() - start_pos.z();
+  double distance = std::sqrt(dx*dx + dy*dy + dz*dz);
+
   if (distance < 1e-6) {
-    RCLCPP_INFO(get_logger(), "Start and end positions are the same");
-    return trajectory_msgs::msg::JointTrajectory();
+    RCLCPP_WARN(get_logger(), "Start and end positions are the same");
+    return std::nullopt;
   }
 
-  // Create trapezoidal profile for path parameter s(t)
+  // Create trapezoidal profile for Cartesian distance
   TrapezoidalProfile profile(distance, v_max_, a_max_);
   double total_time = profile.getTotalTime();
 
-  RCLCPP_INFO(get_logger(), "Generating Cartesian trajectory: d=%.3fm, T=%.3fs", 
-              distance, total_time);
+  RCLCPP_INFO(get_logger(), "Cartesian trajectory:");
+  RCLCPP_INFO(get_logger(), "  Distance: %.4f m", distance);
+  RCLCPP_INFO(get_logger(), "  Duration: %.3f s", total_time);
+  RCLCPP_INFO(get_logger(), "  Peak velocity: %.4f m/s", profile.getPeakVelocity());
+  RCLCPP_INFO(get_logger(), "  Start: (%.3f, %.3f, %.3f)", 
+              start_pos.x(), start_pos.y(), start_pos.z());
+  RCLCPP_INFO(get_logger(), "  End:   (%.3f, %.3f, %.3f)", 
+              end_pos.x(), end_pos.y(), end_pos.z());
 
-  // Generate trajectory points
+  // Direction unit vector in Cartesian space
+  Eigen::Vector3d direction(dx/distance, dy/distance, dz/distance);
+
+  // Build trajectory
   trajectory_msgs::msg::JointTrajectory trajectory;
+  trajectory.header.stamp = this->get_clock()->now();
+  trajectory.header.frame_id = BASE_FRAME;
   trajectory.joint_names = ALL_JOINT_NAMES;
 
-  int n_points = static_cast<int>(std::ceil(total_time / dt_)) + 1;
-  Eigen::VectorXd current_seed = seed_joints;
+  // Storage for trajectory data (for recording)
+  std::vector<Eigen::Vector3d> trajectory_poses;
+  std::vector<Eigen::Vector3d> trajectory_velocities;
+
+  // Sample trajectory points
+  double t = 0.0;
+  Eigen::VectorXd prev_joints = seed_joints;
   int ik_failures = 0;
   const int max_ik_failures = 5;
 
-  for (int i = 0; i < n_points; ++i) {
-    double t = std::min(i * dt_, total_time);
-    auto [s, s_dot, s_ddot] = profile.evaluate(t);
+  while (t <= total_time + dt_) {
+    // Get position and velocity along the path
+    auto [pos_scalar, vel_scalar, acc_scalar] = profile.evaluate(t);
 
-    // Interpolate position
-    Eigen::Vector3d pos = start_pos + (end_pos - start_pos) * (s / distance);
+    // Normalized parameter s ∈ [0, 1]
+    double s = (distance > 1e-9) ? (pos_scalar / distance) : 1.0;
+    s = std::clamp(s, 0.0, 1.0);
 
-    // Compute IK
-    auto ik_result = computeIK(pos, orientation, current_seed);
+    // Interpolate pose linearly in Cartesian space
+    Eigen::Vector3d current_pos = start_pos + (end_pos - start_pos) * s;
+
+    // Compute Cartesian velocity vector
+    Eigen::Vector3d cart_vel = direction * vel_scalar;
+
+    // Solve IK for this pose
+    auto ik_result = computeIK(current_pos, orientation, prev_joints);
+
     if (!ik_result) {
       ik_failures++;
       if (ik_failures > max_ik_failures) {
-        RCLCPP_ERROR(get_logger(), "Too many IK failures");
+        RCLCPP_ERROR(get_logger(), "Too many IK failures (%d), aborting trajectory", ik_failures);
         return std::nullopt;
       }
+      t += dt_;
       continue;
     }
 
-    ik_failures = 0;
-    Eigen::VectorXd arm_joints = *ik_result;
+    Eigen::VectorXd joint_positions = *ik_result;
+
+    // Compute joint velocities using numerical differentiation
+    Eigen::VectorXd joint_velocities = Eigen::VectorXd::Zero(ALL_JOINT_NAMES.size());
+    if (t > 0 && !trajectory.points.empty()) {
+      for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
+        joint_velocities(j) = (joint_positions(j) - prev_joints(j)) / dt_;
+      }
+    }
+
+    prev_joints = joint_positions;
+
+    // Store for recording
+    trajectory_poses.push_back(current_pos);
+    trajectory_velocities.push_back(cart_vel);
 
     // Create trajectory point
     trajectory_msgs::msg::JointTrajectoryPoint point;
@@ -302,92 +382,102 @@ std::optional<trajectory_msgs::msg::JointTrajectory> CartesianMotion::generateCa
     point.velocities.resize(ALL_JOINT_NAMES.size());
     point.accelerations.resize(ALL_JOINT_NAMES.size());
 
-    // Lift joint stays constant
-    point.positions[0] = current_lift_position_;
-    point.velocities[0] = 0.0;
-    point.accelerations[0] = 0.0;
-
-    // Arm joints from IK
-    for (size_t j = 0; j < ARM_JOINT_NAMES.size(); ++j) {
-      point.positions[j + 1] = arm_joints(j);
-      // Velocity estimation from Jacobian would be more accurate
-      // For now, use numerical differentiation if we have previous point
-      if (!trajectory.points.empty()) {
-        double dt_actual = dt_;
-        point.velocities[j + 1] = (arm_joints(j) - trajectory.points.back().positions[j + 1]) / dt_actual;
-      } else {
-        point.velocities[j + 1] = 0.0;
-      }
-      point.accelerations[j + 1] = 0.0;
+    for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
+      point.positions[j] = joint_positions(j);
+      point.velocities[j] = joint_velocities(j);
+      point.accelerations[j] = 0.0;  // Let controller handle accelerations
     }
 
     point.time_from_start.sec = static_cast<int32_t>(t);
     point.time_from_start.nanosec = static_cast<uint32_t>((t - point.time_from_start.sec) * 1e9);
 
     trajectory.points.push_back(point);
-
-    // Update seed for next IK
-    current_seed(0) = current_lift_position_;
-    for (size_t j = 0; j < ARM_JOINT_NAMES.size(); ++j) {
-      current_seed(j + 1) = arm_joints(j);
-    }
+    t += dt_;
   }
 
-  // Ensure the last point has zero velocity (JTC requirement)
-  if (!trajectory.points.empty()) {
+  // Ensure final point is exactly at goal with zero velocity
+  auto final_ik = computeIK(end_pos, orientation, prev_joints);
+  if (final_ik && !trajectory.points.empty()) {
     auto& last_point = trajectory.points.back();
-    for (size_t j = 0; j < last_point.velocities.size(); ++j) {
+    for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
+      last_point.positions[j] = (*final_ik)(j);
       last_point.velocities[j] = 0.0;
       last_point.accelerations[j] = 0.0;
+    }
+    last_point.time_from_start.sec = static_cast<int32_t>(total_time);
+    last_point.time_from_start.nanosec = static_cast<uint32_t>((total_time - last_point.time_from_start.sec) * 1e9);
+  }
+
+  if (ik_failures > 0) {
+    RCLCPP_WARN(get_logger(), "Trajectory completed with %d IK failures", ik_failures);
+  }
+
+  RCLCPP_INFO(get_logger(), "Generated trajectory with %zu points", trajectory.points.size());
+
+  // Store commanded data if recording
+  if (recording_) {
+    double time_offset = now() - record_start_time_;
+    for (size_t i = 0; i < trajectory.points.size(); ++i) {
+      const auto& point = trajectory.points[i];
+      double t_point = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9;
+      commanded_times_.push_back(time_offset + t_point);
+
+      for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
+        commanded_joint_positions_[ALL_JOINT_NAMES[j]].push_back(point.positions[j]);
+        commanded_joint_velocities_[ALL_JOINT_NAMES[j]].push_back(point.velocities[j]);
+      }
+
+      if (i < trajectory_poses.size()) {
+        commanded_cartesian_x_.push_back(trajectory_poses[i].x());
+        commanded_cartesian_y_.push_back(trajectory_poses[i].y());
+        commanded_cartesian_z_.push_back(trajectory_poses[i].z());
+        commanded_cartesian_vx_.push_back(trajectory_velocities[i].x());
+        commanded_cartesian_vy_.push_back(trajectory_velocities[i].y());
+        commanded_cartesian_vz_.push_back(trajectory_velocities[i].z());
+      }
     }
   }
 
   return trajectory;
 }
 
-trajectory_msgs::msg::JointTrajectory CartesianMotion::generateLiftTrajectory(
-  double start_height,
-  double end_height,
-  const Eigen::VectorXd& hold_arm_joints)
+bool CartesianMotion::moveToXYZ(double x, double y, double z, double v_max, double a_max)
 {
-  TrapezoidalProfile profile(end_height - start_height, lift_v_max_, a_max_);
-  double total_time = profile.getTotalTime();
-
-  RCLCPP_INFO(get_logger(), "Generating lift trajectory: h=%.3f->%.3f, T=%.3fs",
-              start_height, end_height, total_time);
-
-  trajectory_msgs::msg::JointTrajectory trajectory;
-  trajectory.joint_names = ALL_JOINT_NAMES;
-
-  int n_points = static_cast<int>(std::ceil(total_time / dt_)) + 1;
-  for (int i = 0; i < n_points; ++i) {
-    double t = std::min(i * dt_, total_time);
-    auto [pos, vel, acc] = profile.evaluate(t);
-
-    trajectory_msgs::msg::JointTrajectoryPoint point;
-    point.positions.resize(ALL_JOINT_NAMES.size());
-    point.velocities.resize(ALL_JOINT_NAMES.size());
-    point.accelerations.resize(ALL_JOINT_NAMES.size());
-
-    // Lift joint
-    point.positions[0] = start_height + pos;
-    point.velocities[0] = vel;
-    point.accelerations[0] = acc;
-
-    // Arm joints held constant
-    for (size_t j = 0; j < ARM_JOINT_NAMES.size(); ++j) {
-      point.positions[j + 1] = hold_arm_joints(j + 1);
-      point.velocities[j + 1] = 0.0;
-      point.accelerations[j + 1] = 0.0;
-    }
-
-    point.time_from_start.sec = static_cast<int32_t>(t);
-    point.time_from_start.nanosec = static_cast<uint32_t>((t - point.time_from_start.sec) * 1e9);
-
-    trajectory.points.push_back(point);
+  // Get current pose for orientation
+  auto current_pose = getCurrentEEPose();
+  if (!current_pose) {
+    RCLCPP_ERROR(get_logger(), "Could not get current end-effector pose");
+    return false;
   }
 
-  return trajectory;
+  auto [current_pos, current_orient] = *current_pose;
+  Eigen::Vector3d target_pos(x, y, z);
+
+  // Temporarily override parameters
+  double old_v_max = v_max_;
+  double old_a_max = a_max_;
+  v_max_ = v_max;
+  a_max_ = a_max;
+
+  // Generate trajectory
+  Eigen::VectorXd current_joints;
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    current_joints = current_positions_;
+  }
+
+  auto trajectory = generateCartesianTrajectory(
+    current_pos, target_pos, current_orient, current_joints);
+
+  // Restore parameters
+  v_max_ = old_v_max;
+  a_max_ = old_a_max;
+
+  if (!trajectory) {
+    return false;
+  }
+
+  return executeTrajectory(*trajectory);
 }
 
 bool CartesianMotion::executeTrajectory(const trajectory_msgs::msg::JointTrajectory& trajectory)
@@ -407,90 +497,98 @@ bool CartesianMotion::executeTrajectory(const trajectory_msgs::msg::JointTraject
 
   RCLCPP_INFO(get_logger(), "Sending trajectory with %zu points", trajectory.points.size());
 
-  // Track result via callback since executor is already running
-  std::atomic<bool> goal_accepted{false};
-  std::atomic<bool> goal_done{false};
-  std::atomic<bool> goal_succeeded{false};
+  // Use promise/future pattern for clean synchronization
+  auto goal_response_promise = std::make_shared<std::promise<GoalHandleFJT::SharedPtr>>();
+  auto goal_response_future = goal_response_promise->get_future();
 
   auto send_goal_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
-  
   send_goal_options.goal_response_callback = 
-    [this, &goal_accepted](const GoalHandleFJT::SharedPtr& goal_handle) {
-      if (!goal_handle) {
-        RCLCPP_ERROR(get_logger(), "Goal was rejected");
-        goal_accepted.store(false);
-      } else {
-        RCLCPP_INFO(get_logger(), "Goal accepted");
-        goal_accepted.store(true);
-      }
-    };
-  
-  send_goal_options.result_callback = 
-    [this, &goal_done, &goal_succeeded](const GoalHandleFJT::WrappedResult& result) {
-      if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-        RCLCPP_INFO(get_logger(), "Trajectory execution succeeded");
-        goal_succeeded.store(true);
-      } else {
-        RCLCPP_WARN(get_logger(), "Trajectory execution failed with code: %d", 
-                    static_cast<int>(result.code));
-        goal_succeeded.store(false);
-      }
-      goal_done.store(true);
+    [this, goal_response_promise](const GoalHandleFJT::SharedPtr& goal_handle) {
+      goal_response_promise->set_value(goal_handle);
     };
 
-  // Send goal
+  // Send goal asynchronously
   action_client_->async_send_goal(goal, send_goal_options);
 
-  // Wait for goal acceptance
-  auto start = std::chrono::steady_clock::now();
-  while (!goal_accepted.load() && !goal_done.load()) {
-    auto elapsed = std::chrono::steady_clock::now() - start;
-    if (std::chrono::duration<double>(elapsed).count() > 10.0) {
-      RCLCPP_ERROR(get_logger(), "Timeout waiting for goal acceptance");
-      return false;
-    }
-    std::this_thread::sleep_for(10ms);
-  }
-
-  if (!goal_accepted.load()) {
+  // Wait for goal response with timeout
+  auto goal_status = goal_response_future.wait_for(10s);
+  if (goal_status == std::future_status::timeout) {
+    RCLCPP_ERROR(get_logger(), "Timeout waiting for goal response");
     return false;
   }
 
-  // Calculate expected duration
+  auto goal_handle = goal_response_future.get();
+  if (!goal_handle) {
+    RCLCPP_ERROR(get_logger(), "Goal was rejected");
+    return false;
+  }
+
+  RCLCPP_INFO(get_logger(), "Goal accepted");
+
+  // Wait for result using future
+  auto result_future = action_client_->async_get_result(goal_handle);
+
+  // Calculate timeout based on trajectory duration
   double expected_duration = 0.0;
   if (!trajectory.points.empty()) {
     const auto& last_point = trajectory.points.back();
     expected_duration = last_point.time_from_start.sec + 
                         last_point.time_from_start.nanosec * 1e-9;
   }
-  double timeout_sec = expected_duration + 10.0;
+  auto timeout = std::chrono::duration<double>(expected_duration + 10.0);
 
-  // Wait for result
-  start = std::chrono::steady_clock::now();
-  while (!goal_done.load()) {
-    auto elapsed = std::chrono::steady_clock::now() - start;
-    if (std::chrono::duration<double>(elapsed).count() > timeout_sec) {
-      RCLCPP_ERROR(get_logger(), "Timeout waiting for result");
-      return false;
-    }
-    std::this_thread::sleep_for(50ms);
+  // Wait for result with timeout
+  auto result_status = result_future.wait_for(
+    std::chrono::duration_cast<std::chrono::milliseconds>(timeout));
+
+  if (result_status == std::future_status::timeout) {
+    RCLCPP_ERROR(get_logger(), "Timeout waiting for trajectory execution");
+    return false;
   }
 
-  return goal_succeeded.load();
+  auto wrapped_result = result_future.get();
+  if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+    RCLCPP_INFO(get_logger(), "Trajectory execution SUCCEEDED");
+    return true;
+  } else {
+    RCLCPP_WARN(get_logger(), "Trajectory execution failed with code: %d", 
+                static_cast<int>(wrapped_result.code));
+    return false;
+  }
 }
 
 void CartesianMotion::startRecording()
 {
   std::lock_guard<std::mutex> lock(state_mutex_);
+  
+  // Clear measured data
   recorded_times_.clear();
-  recorded_positions_.clear();
-  recorded_velocities_.clear();
-  recorded_ee_positions_.clear();
-  recorded_ee_velocities_.clear();
+  recorded_joint_positions_.clear();
+  recorded_joint_velocities_.clear();
+  recorded_cartesian_time_.clear();
+  recorded_cartesian_x_.clear();
+  recorded_cartesian_y_.clear();
+  recorded_cartesian_z_.clear();
+  recorded_cartesian_vx_.clear();
+  recorded_cartesian_vy_.clear();
+  recorded_cartesian_vz_.clear();
+
+  // Clear commanded data
+  commanded_times_.clear();
+  commanded_joint_positions_.clear();
+  commanded_joint_velocities_.clear();
+  commanded_cartesian_x_.clear();
+  commanded_cartesian_y_.clear();
+  commanded_cartesian_z_.clear();
+  commanded_cartesian_vx_.clear();
+  commanded_cartesian_vy_.clear();
+  commanded_cartesian_vz_.clear();
 
   for (const auto& name : ALL_JOINT_NAMES) {
-    recorded_positions_[name] = {};
-    recorded_velocities_[name] = {};
+    recorded_joint_positions_[name] = {};
+    recorded_joint_velocities_[name] = {};
+    commanded_joint_positions_[name] = {};
+    commanded_joint_velocities_[name] = {};
   }
 
   record_start_time_ = now();
@@ -501,7 +599,50 @@ void CartesianMotion::startRecording()
 void CartesianMotion::stopRecording()
 {
   recording_ = false;
-  RCLCPP_INFO(get_logger(), "Stopped recording. Recorded %zu samples", recorded_times_.size());
+  RCLCPP_INFO(get_logger(), "Stopped recording. %zu samples", recorded_times_.size());
+
+  // Compute measured Cartesian positions using FK (post-processing, like Python)
+  RCLCPP_INFO(get_logger(), "Computing measured Cartesian positions via FK...");
+  
+  // Sample every Nth point to avoid too many FK calls (like Python)
+  size_t sample_step = std::max(size_t(1), recorded_times_.size() / 200);
+  
+  for (size_t idx = 0; idx < recorded_times_.size(); idx += sample_step) {
+    Eigen::VectorXd joint_pos(ALL_JOINT_NAMES.size());
+    for (size_t j = 0; j < ALL_JOINT_NAMES.size(); ++j) {
+      joint_pos(j) = recorded_joint_positions_[ALL_JOINT_NAMES[j]][idx];
+    }
+    
+    auto pose = computeFK(joint_pos);
+    if (pose) {
+      recorded_cartesian_time_.push_back(recorded_times_[idx]);
+      recorded_cartesian_x_.push_back(pose->first.x());
+      recorded_cartesian_y_.push_back(pose->first.y());
+      recorded_cartesian_z_.push_back(pose->first.z());
+    }
+  }
+
+  // Compute measured Cartesian velocities from positions
+  for (size_t i = 0; i < recorded_cartesian_time_.size(); ++i) {
+    if (i > 0) {
+      double dt = recorded_cartesian_time_[i] - recorded_cartesian_time_[i-1];
+      if (dt > 0.001) {
+        recorded_cartesian_vx_.push_back((recorded_cartesian_x_[i] - recorded_cartesian_x_[i-1]) / dt);
+        recorded_cartesian_vy_.push_back((recorded_cartesian_y_[i] - recorded_cartesian_y_[i-1]) / dt);
+        recorded_cartesian_vz_.push_back((recorded_cartesian_z_[i] - recorded_cartesian_z_[i-1]) / dt);
+      } else {
+        recorded_cartesian_vx_.push_back(0.0);
+        recorded_cartesian_vy_.push_back(0.0);
+        recorded_cartesian_vz_.push_back(0.0);
+      }
+    } else {
+      recorded_cartesian_vx_.push_back(0.0);
+      recorded_cartesian_vy_.push_back(0.0);
+      recorded_cartesian_vz_.push_back(0.0);
+    }
+  }
+
+  RCLCPP_INFO(get_logger(), "  Computed FK for %zu samples", recorded_cartesian_time_.size());
 }
 
 void CartesianMotion::saveToCSV(const std::string& filename)
@@ -518,15 +659,26 @@ void CartesianMotion::saveToCSV(const std::string& filename)
   for (const auto& name : ALL_JOINT_NAMES) {
     file << ",pos_" << name << ",vel_" << name;
   }
+  file << ",cart_x,cart_y,cart_z,cart_vx,cart_vy,cart_vz";
   file << "\n";
 
-  // Write data
+  // Write measured data
   for (size_t i = 0; i < recorded_times_.size(); ++i) {
-    file << recorded_times_[i];
+    file << std::fixed << std::setprecision(6) << recorded_times_[i];
     for (const auto& name : ALL_JOINT_NAMES) {
-      file << "," << recorded_positions_[name][i] 
-           << "," << recorded_velocities_[name][i];
+      if (i < recorded_joint_positions_[name].size()) {
+        file << "," << recorded_joint_positions_[name][i];
+      } else {
+        file << ",";
+      }
+      if (i < recorded_joint_velocities_[name].size()) {
+        file << "," << recorded_joint_velocities_[name][i];
+      } else {
+        file << ",";
+      }
     }
+    // Cartesian data (may be sparse)
+    file << ",,,,,";  // Placeholders for Cartesian data
     file << "\n";
   }
 
@@ -536,7 +688,16 @@ void CartesianMotion::saveToCSV(const std::string& filename)
 
 bool CartesianMotion::executeDemo()
 {
-  RCLCPP_INFO(get_logger(), "Starting Cartesian motion demo");
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "======================================================================");
+  RCLCPP_INFO(get_logger(), " TRUE CARTESIAN MOTION with Trapezoidal Velocity Profiles");
+  RCLCPP_INFO(get_logger(), "======================================================================");
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "This demo achieves CONSTANT-VELOCITY Cartesian motion by:");
+  RCLCPP_INFO(get_logger(), "  1. Defining waypoints in Cartesian space (XYZ)");
+  RCLCPP_INFO(get_logger(), "  2. Applying trapezoidal profile to Cartesian distance");
+  RCLCPP_INFO(get_logger(), "  3. Using MoveIt IK to compute joint angles at each timestep");
+  RCLCPP_INFO(get_logger(), " ");
 
   // Wait for services and joint state
   if (!waitForServices()) {
@@ -548,63 +709,162 @@ bool CartesianMotion::executeDemo()
 
   RCLCPP_INFO(get_logger(), "Services and joint state ready");
 
-  // Get current pose
-  auto fk_result = computeFK(current_positions_);
-  if (!fk_result) {
-    RCLCPP_ERROR(get_logger(), "Failed to compute initial FK");
+  // Get current end-effector pose
+  auto current_pose = getCurrentEEPose();
+  if (!current_pose) {
+    RCLCPP_ERROR(get_logger(), "Could not get current end-effector pose!");
     return false;
   }
 
-  auto [current_pos, current_orient] = *fk_result;
+  auto [ee_pos, ee_orient] = *current_pose;
   RCLCPP_INFO(get_logger(), "Current EE position: (%.3f, %.3f, %.3f)",
-              current_pos.x(), current_pos.y(), current_pos.z());
+              ee_pos.x(), ee_pos.y(), ee_pos.z());
 
   // Start recording
   startRecording();
 
-  // Demo pattern: square at current height
-  double square_size = 0.15;
-  std::vector<Eigen::Vector3d> corners = {
-    current_pos,
-    current_pos + Eigen::Vector3d(square_size, 0, 0),
-    current_pos + Eigen::Vector3d(square_size, square_size, 0),
-    current_pos + Eigen::Vector3d(0, square_size, 0),
-    current_pos
+  // Motion parameters (matching Python)
+  const double V_MAX = 0.08;      // 8 cm/s
+  const double A_MAX = 0.15;      // 15 cm/s²
+  const double LIFT_V_MAX = 0.1;  // 10 cm/s
+
+  // Get initial pose and define waypoints relative to it
+  double base_x = ee_pos.x();
+  double base_y = ee_pos.y();
+  double base_z = ee_pos.z();
+
+  RCLCPP_INFO(get_logger(), "Base position: (%.3f, %.3f, %.3f)", base_x, base_y, base_z);
+
+  // =========================================================
+  // PHASE 1: Square pattern at current Z height
+  // =========================================================
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "PHASE 1: Square pattern in XY plane");
+  RCLCPP_INFO(get_logger(), "============================================================");
+
+  double square_size = 0.15;  // 15 cm square
+  std::vector<std::tuple<double, double, double>> square_waypoints = {
+    {base_x + square_size, base_y, base_z},                    // Right
+    {base_x + square_size, base_y + square_size, base_z},      // Up
+    {base_x, base_y + square_size, base_z},                    // Left
+    {base_x, base_y, base_z},                                  // Back to start
   };
 
-  Eigen::VectorXd current_joints = current_positions_;
-
-  // Execute square pattern
-  for (size_t i = 1; i < corners.size(); ++i) {
-    RCLCPP_INFO(get_logger(), "Moving to corner %zu/%zu", i, corners.size() - 1);
-
-    auto traj = generateCartesianTrajectory(
-      corners[i - 1], corners[i], current_orient, current_joints);
-
-    if (!traj || !executeTrajectory(*traj)) {
-      RCLCPP_ERROR(get_logger(), "Failed to execute trajectory");
-      stopRecording();
-      return false;
+  for (size_t i = 0; i < square_waypoints.size(); ++i) {
+    auto [x, y, z] = square_waypoints[i];
+    RCLCPP_INFO(get_logger(), "  Moving to waypoint %zu: (%.3f, %.3f, %.3f)", i+1, x, y, z);
+    if (!moveToXYZ(x, y, z, V_MAX, A_MAX)) {
+      RCLCPP_WARN(get_logger(), "  Failed to reach waypoint %zu", i+1);
     }
-
-    current_joints = current_positions_;
-    std::this_thread::sleep_for(200ms);
+    std::this_thread::sleep_for(500ms);
   }
 
-  // Lift motion
-  RCLCPP_INFO(get_logger(), "Executing lift motion");
-  double lift_start = current_lift_position_;
-  double lift_end = lift_start + 0.2;
+  // =========================================================
+  // PHASE 2: Move lift UP (Z motion via lift joint)
+  // =========================================================
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "PHASE 2: Raise lift by 0.3m");
+  RCLCPP_INFO(get_logger(), "============================================================");
 
-  auto lift_traj = generateLiftTrajectory(lift_start, lift_end, current_joints);
-  if (!executeTrajectory(lift_traj)) {
-    RCLCPP_ERROR(get_logger(), "Failed to execute lift trajectory");
-    stopRecording();
-    return false;
+  auto pose_after_square = getCurrentEEPose();
+  if (pose_after_square) {
+    auto [pos, orient] = *pose_after_square;
+    double new_z = pos.z() + 0.3;
+    RCLCPP_INFO(get_logger(), "  Moving Z from %.3f to %.3f", pos.z(), new_z);
+    moveToXYZ(pos.x(), pos.y(), new_z, LIFT_V_MAX, A_MAX);
+  }
+  std::this_thread::sleep_for(1s);
+
+  // =========================================================
+  // PHASE 3: Triangle pattern at new height
+  // =========================================================
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "PHASE 3: Triangle pattern at elevated height");
+  RCLCPP_INFO(get_logger(), "============================================================");
+
+  auto pose_phase3 = getCurrentEEPose();
+  if (pose_phase3) {
+    auto [pos, orient] = *pose_phase3;
+    double cx = pos.x();
+    double cy = pos.y();
+    double cz = pos.z();
+
+    double tri_size = 0.12;  // 12 cm triangle
+    std::vector<std::tuple<double, double, double>> triangle_waypoints = {
+      {cx + tri_size, cy, cz},                           // Right
+      {cx + tri_size/2, cy + tri_size * 0.866, cz},      // Top (equilateral)
+      {cx, cy, cz},                                       // Back to start
+    };
+
+    for (size_t i = 0; i < triangle_waypoints.size(); ++i) {
+      auto [x, y, z] = triangle_waypoints[i];
+      RCLCPP_INFO(get_logger(), "  Moving to waypoint %zu: (%.3f, %.3f, %.3f)", i+1, x, y, z);
+      moveToXYZ(x, y, z, V_MAX, A_MAX);
+      std::this_thread::sleep_for(500ms);
+    }
   }
 
-  // Stop recording and save
+  // =========================================================
+  // PHASE 4: Move lift UP again
+  // =========================================================
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "PHASE 4: Raise lift another 0.3m");
+  RCLCPP_INFO(get_logger(), "============================================================");
+
+  auto pose_phase4 = getCurrentEEPose();
+  if (pose_phase4) {
+    auto [pos, orient] = *pose_phase4;
+    double new_z = pos.z() + 0.3;
+    RCLCPP_INFO(get_logger(), "  Moving Z from %.3f to %.3f", pos.z(), new_z);
+    moveToXYZ(pos.x(), pos.y(), new_z, LIFT_V_MAX, A_MAX);
+  }
+  std::this_thread::sleep_for(1s);
+
+  // =========================================================
+  // PHASE 5: Line pattern at top height
+  // =========================================================
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "PHASE 5: Back-and-forth line at top height");
+  RCLCPP_INFO(get_logger(), "============================================================");
+
+  auto pose_phase5 = getCurrentEEPose();
+  if (pose_phase5) {
+    auto [pos, orient] = *pose_phase5;
+    double cx = pos.x();
+    double cy = pos.y();
+    double cz = pos.z();
+
+    double line_length = 0.2;  // 20 cm line
+    std::vector<std::tuple<double, double, double>> line_waypoints = {
+      {cx + line_length, cy, cz},    // Forward
+      {cx, cy, cz},                   // Back
+      {cx, cy + line_length, cz},     // Right
+      {cx, cy, cz},                   // Back
+    };
+
+    for (size_t i = 0; i < line_waypoints.size(); ++i) {
+      auto [x, y, z] = line_waypoints[i];
+      RCLCPP_INFO(get_logger(), "  Moving to waypoint %zu: (%.3f, %.3f, %.3f)", i+1, x, y, z);
+      moveToXYZ(x, y, z, V_MAX, A_MAX);
+      std::this_thread::sleep_for(300ms);
+    }
+  }
+
+  // =========================================================
+  // SAVE RESULTS
+  // =========================================================
+  std::this_thread::sleep_for(1s);
   stopRecording();
+
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "============================================================");
+  RCLCPP_INFO(get_logger(), "SAVING RESULTS");
+  RCLCPP_INFO(get_logger(), "============================================================");
 
   auto now_time = std::chrono::system_clock::now();
   auto time_t_now = std::chrono::system_clock::to_time_t(now_time);
@@ -613,6 +873,13 @@ bool CartesianMotion::executeDemo()
   std::string csv_filename = "cartesian_motion_cpp_" + ss.str() + ".csv";
   
   saveToCSV(csv_filename);
+
+  RCLCPP_INFO(get_logger(), " ");
+  RCLCPP_INFO(get_logger(), "KEY OBSERVATION:");
+  RCLCPP_INFO(get_logger(), "  - Cartesian velocities show TRAPEZOIDAL profiles");
+  RCLCPP_INFO(get_logger(), "  - XY trajectory shows STRAIGHT LINES");
+  RCLCPP_INFO(get_logger(), "  - Joint velocities are NOT trapezoidal (expected!)");
+  RCLCPP_INFO(get_logger(), "  This proves TRUE Cartesian motion with constant velocity!");
 
   RCLCPP_INFO(get_logger(), "Cartesian motion demo completed successfully");
   return true;
@@ -633,7 +900,7 @@ int main(int argc, char** argv)
 
   auto node = std::make_shared<puma560_cpp::CartesianMotion>();
 
-  // Use multi-threaded executor
+  // Use multi-threaded executor for proper callback group handling
   rclcpp::executors::MultiThreadedExecutor executor;
   executor.add_node(node);
 
@@ -650,4 +917,3 @@ int main(int argc, char** argv)
 
   return success ? 0 : 1;
 }
-

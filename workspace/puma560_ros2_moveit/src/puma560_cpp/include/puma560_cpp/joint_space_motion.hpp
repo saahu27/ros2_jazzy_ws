@@ -65,12 +65,15 @@ private:
   static const std::string ACTION_NAME;
   static const std::string RESULTS_DIR;
 
+  // Callback groups (must be stored as member to keep alive)
+  rclcpp::CallbackGroup::SharedPtr action_callback_group_;
+  rclcpp::CallbackGroup::SharedPtr sub_callback_group_;
+
   // Subscribers
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
 
   // Action client with dedicated callback group
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr action_client_;
-  rclcpp::CallbackGroup::SharedPtr action_callback_group_;
 
   // State
   std::mutex state_mutex_;
