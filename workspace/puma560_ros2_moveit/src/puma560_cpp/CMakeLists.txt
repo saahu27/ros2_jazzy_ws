@@ -78,19 +78,19 @@ ament_target_dependencies(cartesian_motion
   moveit_msgs
 )
 
-# Compliance Control Node
-add_executable(compliance_control src/compliance_control.cpp)
-target_link_libraries(compliance_control puma560_math Eigen3::Eigen)
-ament_target_dependencies(compliance_control
-  rclcpp
-  rclcpp_action
-  sensor_msgs
-  geometry_msgs
-  trajectory_msgs
-  control_msgs
-  builtin_interfaces
-  moveit_msgs
-)
+# # Compliance Control Node
+# add_executable(compliance_control src/compliance_control.cpp)
+# target_link_libraries(compliance_control puma560_math Eigen3::Eigen)
+# ament_target_dependencies(compliance_control
+#   rclcpp
+#   rclcpp_action
+#   sensor_msgs
+#   geometry_msgs
+#   trajectory_msgs
+#   control_msgs
+#   builtin_interfaces
+#   moveit_msgs
+# )
 
 # ============================================================
 # Install
@@ -107,7 +107,7 @@ install(TARGETS puma560_math
 install(TARGETS
   joint_space_motion
   cartesian_motion
-  compliance_control
+  # compliance_control
   DESTINATION lib/${PROJECT_NAME}
 )
 

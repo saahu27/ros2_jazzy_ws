@@ -17,21 +17,112 @@ arm:
   planner_configs:
     - RRTConnect
     - RRT
+    - RRTstar
     - PRM
+    - PRMstar
+    - KPIECE
+    - BKPIECE
+    - LBKPIECE
+    - EST
+    - BiEST
+    - TRRT
+    - LazyPRMstar
   projection_evaluator: joints(j1,j2)
-  longest_valid_segment_fraction: 0.005
+  # Smaller segment fraction for better constraint satisfaction
+  # This controls the granularity of collision checking and constraint validation
+  longest_valid_segment_fraction: 0.001
+  # Constraint approximation tolerance - how closely to follow the constraint manifold
+  constraint_approximation_tolerance: 0.001
+  # Enforce path constraints throughout the trajectory
+  enforce_constrained_state_space: true
 
 planner_configs:
+  # ==============================================================================
+  # RRT-BASED PLANNERS (Tree-based, single query)
+  # ==============================================================================
   RRTConnect:
     type: geometric::RRTConnect
+    # Step size for tree extension (0.0 = auto-computed based on space bounds)
     range: 0.0
 
   RRT:
     type: geometric::RRT
     range: 0.0
+    # Probability of sampling goal state directly (higher = faster but less exploration)
     goal_bias: 0.05
 
+  RRTstar:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    # Delay collision checking for optimization
+    delay_collision_checking: true
+
+  # ==============================================================================
+  # KPIECE PLANNERS (Kinodynamic Planning by Interior-Exterior Cell Exploration)
+  # Excellent for constrained planning - uses projection for cell decomposition
+  # ==============================================================================
+  KPIECE:
+    type: geometric::KPIECE1
+    range: 0.0
+    goal_bias: 0.05
+    # Border fraction controls exploration vs exploitation
+    border_fraction: 0.9
+    # Failure detection for stuck states
+    failed_expansion_score_factor: 0.5
+    min_valid_path_fraction: 0.5
+
+  BKPIECE:
+    type: geometric::BKPIECE1
+    range: 0.0
+    border_fraction: 0.9
+    failed_expansion_score_factor: 0.5
+    min_valid_path_fraction: 0.5
+
+  LBKPIECE:
+    type: geometric::LBKPIECE1
+    range: 0.0
+    border_fraction: 0.9
+    min_valid_path_fraction: 0.5
+
+  # ==============================================================================
+  # PRM PLANNERS (Roadmap-based, multi-query)
+  # ==============================================================================
   PRM:
     type: geometric::PRM
     max_nearest_neighbors: 10
+
+  PRMstar:
+    type: geometric::PRMstar
+
+  LazyPRMstar:
+    type: geometric::LazyPRMstar
+
+  # ==============================================================================
+  # EST PLANNERS (Expansive Space Trees)
+  # Good for spaces with complex constraint manifolds
+  # ==============================================================================
+  EST:
+    type: geometric::EST
+    range: 0.0
+    goal_bias: 0.05
+
+  BiEST:
+    type: geometric::BiEST
+    range: 0.0
+
+  # ==============================================================================
+  # TRRT (Transition-based RRT)
+  # Favors low-cost regions - useful for smoother paths
+  # ==============================================================================
+  TRRT:
+    type: geometric::TRRT
+    range: 0.0
+    goal_bias: 0.05
+    max_states_failed: 10
+    temp_change_factor: 2.0
+    min_temperature: 1e-10
+    init_temperature: 1e-6
+    frontier_threshold: 0.0
+    frontier_node_ratio: 0.1
 
